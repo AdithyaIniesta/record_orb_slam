@@ -1,0 +1,13 @@
+# build environment and output
+.venv/
+build/
+dist/
+*.spec
+*.exe
+build.log
+build.log.err
+__pycache__/
+
+# your recordings (large) and per-PC settings written by the app
+recordings/
+rig_capture_config.json
