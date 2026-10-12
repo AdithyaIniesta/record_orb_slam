@@ -1,0 +1,10 @@
+# Kalibr camera chain for the depression 8 mm camera (green mount), 1280x720, from calibration/green_mount/depression/8mmdepression.json.
+# The 5 distortion coefficients were refitted to Kalibr's 4-coefficient radtan over the whole image (see the numbers in the README).
+# Stored under the key cam0 (kalibr_calibrate_imu_camera calibrates one camera at a time) but reads the images of /cam1 of the recording.
+cam0:
+  camera_model: pinhole
+  intrinsics: [1739.948271360, 1737.225132146, 617.173997045, 357.091210024]
+  distortion_model: radtan
+  distortion_coeffs: [-0.398318, 0.137925, -0.004266, 0.002165]
+  resolution: [1280, 720]
+  rostopic: /cam1/image_raw

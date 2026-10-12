@@ -1,0 +1,52 @@
+description: 'Boresight 6 mm camera (green mount) and Cube Orange+ IMU0: extrinsics
+  and time offset, mean of two Kalibr runs (no ROS)'
+runs:
+- stereo_0010
+- stereo_0012
+tag_size_m: 0.05
+T_cam_imu:
+- - 0.02093678523610626
+  - 0.9996787251649005
+  - 0.014286268815058567
+  - -0.03389486652829961
+- - -0.0049953921923502065
+  - -0.01418462295939421
+  - 0.9998869148700488
+  - -0.0485755251408225
+- - 0.9997683217029942
+  - -0.021005783112723424
+  - 0.0046968068939912695
+  - -0.12534897761128683
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_imu_cam:
+- - 0.020936785236106054
+  - -0.0049953921923500955
+  - 0.9997683217029941
+  - 0.12578693271570415
+- - 0.999678725164901
+  - -0.014184622959393977
+  - -0.02100578311272364
+  - 0.030561898014363556
+- - 0.014286268815058819
+  - 0.9998869148700492
+  - 0.004696806893991375
+  - 0.04964300308812281
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+timeshift_cam_imu_s: 0.01208434863802927
+imu_frame: ArduPilot FRD as reported by MAVLink RAW_IMU (IMU0)
+camera_frame: x right, y down, z forward
+run_to_run:
+  rotation_deg: 0.09151203235813407
+  lever_arm_mm:
+  - -4.069808944776231
+  - 13.098008079123057
+  - -9.454054706892896
+  timeshift_ms: -0.3273291964280816
+note: lever arm is good to about +-1 cm (run-to-run difference 17 mm); rotation and
+  time shift repeat to 0.1 deg / 0.3 ms

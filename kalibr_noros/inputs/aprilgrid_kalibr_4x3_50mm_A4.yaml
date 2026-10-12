@@ -1,0 +1,7 @@
+# Kalibr AprilGrid tag36h11 (AprilTag 2 codes), 4x3, tag 50 mm = full black square, spacing 0.3, ids 0-11, id 0 bottom-left. Bar = 100 mm: print at 100% and MEASURE a tag.
+# tagSize = the FULL black square of one tag, in metres: MEASURE it on the print and replace the value below.
+target_type: 'aprilgrid'
+tagCols: 4
+tagRows: 3
+tagSize: 0.0500
+tagSpacing: 0.3

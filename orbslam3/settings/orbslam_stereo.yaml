@@ -1,0 +1,62 @@
+%YAML:1.0
+
+# stereo, cam1=boresight (6mmboresight.json), cam2=depression (8mmdepression.json), green_mount
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: 1310.090571
+Camera1.fy: 1310.282642
+Camera1.cx: 651.892356
+Camera1.cy: 399.115015
+
+Camera1.k1: -0.52901355
+Camera1.k2: 0.24949160
+Camera1.p1: -0.00294280
+Camera1.p2: -0.00663696
+Camera1.k3: -0.01235181
+
+Camera2.fx: 1739.948271
+Camera2.fy: 1737.225132
+Camera2.cx: 617.173997
+Camera2.cy: 357.091210
+
+Camera2.k1: -0.38827407
+Camera2.k2: -0.02302900
+Camera2.p1: -0.00427154
+Camera2.p2: 0.00214886
+Camera2.k3: 0.58942245
+
+Camera.width: 1280
+Camera.height: 720
+
+Camera.fps: 30
+
+# gray images
+Camera.RGB: 1
+
+Stereo.ThDepth: 40.0
+
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.999956933, -0.007955242, -0.004779843, -0.001083177, 0.009147037, 0.931904050, 0.362589539, 0.044453865, 0.001569868, -0.362617644, 0.931936682, -0.006010538, 0.000000000, 0.000000000, 0.000000000, 1.000000000]
+
+ORBextractor.nFeatures: 2000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 12
+ORBextractor.minThFAST: 4
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

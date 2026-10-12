@@ -11,3 +11,8 @@ __pycache__/
 # your recordings (large) and per-PC settings written by the app
 recordings/
 rig_capture_config.json
+
+# python caches, logs, large Kalibr reports
+__pycache__/
+*.log
+kalibr_noros/results/**/*.pdf

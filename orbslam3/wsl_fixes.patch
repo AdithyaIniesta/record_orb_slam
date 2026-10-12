@@ -1,0 +1,103 @@
+diff -u a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-10-10 10:34:18.050770719 +0530
++++ b/CMakeLists.txt	2026-10-10 10:34:18.050770719 +0530
+@@ -14,16 +14,16 @@
+ 
+ # Check C++11 or C++0x support
+ include(CheckCXXCompilerFlag)
+-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
+-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
++CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX11)
++CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX0X)
+ if(COMPILER_SUPPORTS_CXX11)
+-   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
++   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+    add_definitions(-DCOMPILEDWITHC11)
+-   message(STATUS "Using flag -std=c++11.")
++   message(STATUS "Using flag -std=c++17.")
+ elseif(COMPILER_SUPPORTS_CXX0X)
+-   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
++   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+    add_definitions(-DCOMPILEDWITHC0X)
+-   message(STATUS "Using flag -std=c++0x.")
++   message(STATUS "Using flag -std=c++17.")
+ else()
+    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+ endif()
+diff -u a/include/LoopClosing.h b/include/LoopClosing.h
+--- a/include/LoopClosing.h	2026-10-10 10:34:18.040950616 +0530
++++ b/include/LoopClosing.h	2026-10-10 10:34:18.040950616 +0530
+@@ -223,7 +223,7 @@
+     bool mbFixScale;
+ 
+ 
+-    bool mnFullBAIdx;
++    int mnFullBAIdx;
+ 
+ 
+ 
+diff -u a/src/System.cc b/src/System.cc
+--- a/src/System.cc	2026-10-10 10:34:18.040950616 +0530
++++ b/src/System.cc	2026-10-10 10:34:18.040950616 +0530
+@@ -21,6 +21,7 @@
+ #include "System.h"
+ #include "Converter.h"
+ #include <thread>
++#include <chrono>
+ #include <pangolin/pangolin.h>
+ #include <iomanip>
+ #include <openssl/md5.h>
+@@ -523,27 +524,27 @@
+ 
+     mpLocalMapper->RequestFinish();
+     mpLoopCloser->RequestFinish();
+-    /*if(mpViewer)
++    if(mpViewer)
+     {
+         mpViewer->RequestFinish();
+         while(!mpViewer->isFinished())
+             usleep(5000);
+-    }*/
++    }
+ 
+-    // Wait until all thread have effectively stopped
+-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+-    {
+-        if(!mpLocalMapper->isFinished())
+-            cout << "mpLocalMapper is not finished" << endl;*/
+-        /*if(!mpLoopCloser->isFinished())
+-            cout << "mpLoopCloser is not finished" << endl;
+-        if(mpLoopCloser->isRunningGBA()){
+-            cout << "mpLoopCloser is running GBA" << endl;
+-            cout << "break anyway..." << endl;
+-            break;
+-        }*/
+-        /*usleep(5000);
+-    }*/
++    // Wait until all threads have effectively stopped. Upstream had this loop commented out, so Shutdown()
++    // returned while the viewer/mapping threads were still running and the process then crashed on exit
++    // (heap corruption / segfault right after "Saving keyframe trajectory").
++    // A running global BA is only waited for a few seconds so Shutdown() cannot hang.
++    {
++        auto tGbaStart = std::chrono::steady_clock::now();
++        while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
++        {
++            if(mpLocalMapper->isFinished() && mpLoopCloser->isFinished() &&
++               std::chrono::steady_clock::now() - tGbaStart > std::chrono::seconds(5))
++                break;
++            usleep(5000);
++        }
++    }
+ 
+     if(!mStrSaveAtlasToFile.empty())
+     {
+@@ -551,8 +552,7 @@
+         SaveAtlas(FileType::BINARY_FILE);
+     }
+ 
+-    /*if(mpViewer)
+-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
++    // (upstream's pangolin::BindToContext() here aborts under Pangolin 0.8: the context belongs to the viewer thread)
+ 
+ #ifdef REGISTER_TIMES
+     mpTracker->PrintTimeStats();

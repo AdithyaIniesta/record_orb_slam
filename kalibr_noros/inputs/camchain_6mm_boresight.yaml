@@ -1,0 +1,12 @@
+# Kalibr camera chain for the boresight 6 mm camera (green mount), 1280x720.
+# From calibration/green_mount/boresight/6mmboresight.json (OpenCV, 5 distortion coefficients).
+# Kalibr's radial-tangential model has 4 coefficients, so k1,k2,p1,p2 were RE-FITTED to the 5-coefficient model
+# over the whole image (max 0.2 px, mean 0.014 px; simply dropping k3 would give up to 1.7 px at the edges).
+# Intrinsics stay fixed in kalibr_calibrate_imu_camera: only the camera-IMU extrinsics and time offset are estimated.
+cam0:
+  camera_model: pinhole
+  intrinsics: [1310.090570560462, 1310.2826417091774, 651.8923556716335, 399.1150147240843]   # fu, fv, pu, pv [px]
+  distortion_model: radtan
+  distortion_coeffs: [-0.527865, 0.241592, -0.002936, -0.006637]                              # k1, k2, p1(r1), p2(r2)
+  resolution: [1280, 720]
+  rostopic: /cam0/image_raw

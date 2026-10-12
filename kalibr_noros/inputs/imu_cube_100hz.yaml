@@ -1,0 +1,18 @@
+# Kalibr IMU noise model: Cube Orange+ IMU0 over MAVLink, recorded by RigCapture at 100 Hz
+# (SCHED_LOOP_RATE 200 -> 100 Hz stream, 10 ms steps).
+#
+# STARTING VALUES, not Allan-variance results. Basis:
+#  - measured on the still recording stereo_0007 (Cube on the bench, 40 Hz): gyro density 3.4e-05 rad/s/sqrt(Hz),
+#    accel density 9.7e-04 m/s^2/sqrt(Hz). These are LOWER bounds: the stream is ArduPilot's low-pass filtered IMU
+#    (INS_GYRO_FILTER 20 Hz), sampled at message time (not every sample), and quantised to 1 mrad/s and 1 mg.
+#  - Kalibr recommends inflating such values (~10x) for vibration, temperature and unmodelled effects.
+#    Accel 1e-2 = ~10x the measurement. Gyro 1e-3 is deliberately generous (~30x) because the filtering hides noise.
+#  - Random walks cannot be measured from short recordings; these are typical consumer-MEMS values, inflated.
+# To replace them: log the Cube motionless for 2-3 h and run an Allan-variance tool, then use the results x ~5-10.
+rostopic: /imu0
+update_rate: 100.0
+
+accelerometer_noise_density: 1.0e-02   # [m/s^2/sqrt(Hz)]
+accelerometer_random_walk:   2.0e-04   # [m/s^3/sqrt(Hz)]
+gyroscope_noise_density:     1.0e-03   # [rad/s/sqrt(Hz)]
+gyroscope_random_walk:       1.0e-05   # [rad/s^2/sqrt(Hz)]

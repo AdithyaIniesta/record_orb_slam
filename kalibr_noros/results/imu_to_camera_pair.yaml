@@ -1,0 +1,107 @@
+description: 'Rigid-body transform between the Cube Orange+ IMU0 and the green-mount
+  camera PAIR. Pair frame = boresight (left, cam0) camera frame: x right, y down,
+  z forward (optical axis). IMU frame = ArduPilot FRD.'
+T_imu_pair:
+- - 0.01829098451837846
+  - 0.0035950999523290533
+  - 0.9998262424750014
+  - 0.12578693271570415
+- - 0.9997659300699815
+  - -0.011622923209667381
+  - -0.01824808832089797
+  - 0.030561898014363556
+- - 0.01155529993784462
+  - 0.9999259887173622
+  - -0.003806853156021292
+  - 0.04964300308812281
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_pair_imu:
+- - 0.01829098451837846
+  - 0.9997659300699815
+  - 0.01155529993784462
+  - -0.03342915102244996
+- - 0.0035950999523290533
+  - -0.011622923209667381
+  - 0.9999259887173622
+  - -0.04973632694783748
+- - 0.9998262424750014
+  - -0.01824808832089797
+  - -0.003806853156021292
+  - -0.1250183964523975
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_imu_cam0:
+- - 0.01829098451837846
+  - 0.0035950999523290533
+  - 0.9998262424750014
+  - 0.12578693271570415
+- - 0.9997659300699815
+  - -0.011622923209667381
+  - -0.01824808832089797
+  - 0.030561898014363556
+- - 0.01155529993784462
+  - 0.9999259887173622
+  - -0.003806853156021292
+  - 0.04964300308812281
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_imu_cam1:
+- - 0.0198926761711641
+  - -0.35934985768414546
+  - 0.9329908687747875
+  - 0.11991744292413477
+- - 0.999587910449992
+  - -0.012167749863581299
+  - -0.025999137398698455
+  - 0.029071971894717764
+- - 0.0206951858403899
+  - 0.9331235854085146
+  - 0.3589597242552291
+  - 0.0941039424943953
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_cam1_cam0:
+- - 0.9999569326892763
+  - 0.009147036797824006
+  - 0.0015698676610628837
+  - 0.0006859445927241255
+- - -0.007955241534332087
+  - 0.9319040499011686
+  - -0.3626176442341589
+  - -0.04361488055902978
+- - -0.004779842966503585
+  - 0.36258953859098036
+  - 0.9319366821869369
+  - -0.01052224296340153
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+timeshift_cam0_to_imu_ms: 12.08434863802927
+timeshift_cam1_to_imu_ms: 11.6
+time_convention: t_imu = t_camera + shift (camera stamps from the Jetson monotonic
+  clock; cam1 stamped with its own capture time from pairs.csv)
+uncertainty:
+  rotation_deg: about 0.5 (five estimates from both cameras agree this well)
+  translation_mm: about 10-20 for cam0 (three runs), cam1 position taken from the
+    repository stereo file; direct IMU estimates of cam1 scatter by 30-40 mm
+  timeshift_ms: about 1 (cameras differ by about 0.5 ms)
+sources:
+  cam0_imu:
+  - stereo_0010
+  - stereo_0012
+  cam1_imu_rotation:
+  - stereo_0013
+  - stereo_0014
+  - stereo_0015
+  cam0_cam1: calibration/green_mount/stereo_extrinsics.json (verification-only stereo
+    calibration)

@@ -1,0 +1,13 @@
+# Keep Linux scripts and patches LF even when checked out on Windows (CRLF breaks bash and `git apply`).
+* text=auto
+*.sh      text eol=lf
+*.patch   text eol=lf
+*.yaml    text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.bat     text eol=crlf
+# printable boards and images must never be touched (the vector PDFs are plain ASCII and would be corrupted by CRLF conversion)
+*.pdf     binary
+*.png     binary
+*.ico     binary

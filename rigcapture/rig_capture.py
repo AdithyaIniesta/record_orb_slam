@@ -36,7 +36,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "Rig Capture"
 APP_VERSION = "1.0"
-REQUIRED_API = 3        # capture-program interface this app needs (stereo_capture.py API_VERSION)
+REQUIRED_API = 5        # capture-program interface this app needs (stereo_capture.py API_VERSION)
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # ==========================================================================
@@ -399,7 +399,7 @@ class App:
     # -- config ------------------------------------------------------------------------------------
     def _load_cfg(self):
         d = {"ip": "192.168.0.40", "user": "orinnx1", "video_port": 5000, "cmd_port": 5010, "cameras": 1,
-             "theme": DEFAULT_THEME, "exposure_ms": 4.0, "gain": 1, "delay_s": 3, "record_fps": 30, "autostart": True,
+             "theme": DEFAULT_THEME, "exposure_ms": 4.0, "gain": 1, "delay_s": 3, "record_fps": 30, "imu": True, "autostart": True,
              "dest_dir": os.path.join(os.path.expanduser("~"), "Documents", "RigCapture", "recordings")}
         try:
             with open(self.cfg_path, "r", encoding="utf-8") as f:
@@ -595,12 +595,17 @@ class App:
         rc.pack(side=tk.LEFT, padx=4)
         rc.bind("<<ComboboxSelected>>", lambda _e: self._on_rate())
         ttk.Label(opt2, text="frames/s   (60 = every camera frame; better for fast motion, 2x the disk)").pack(side=tk.LEFT)
+        opt3 = ttk.Frame(f)
+        opt3.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(2, 2))
+        self.imu_var = tk.BooleanVar(value=bool(self.cfg.get("imu", True)))
+        ttk.Checkbutton(opt3, text="Record the IMU (Cube Orange on the Jetson's USB)", variable=self.imu_var,
+                        command=self._on_imu_toggle).pack(side=tk.LEFT)
         self.rows = {}
         grid = ttk.Frame(f)
-        grid.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        grid.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         grid.columnconfigure(0, weight=1)
         for i, (name, key) in enumerate([("State", "state"), ("Elapsed", "elapsed"), ("Frames saved", "frames"),
-                                         ("Rate", "rate"), ("Size on Jetson", "size"), ("Free disk (Jetson)", "free")]):
+                                         ("Rate", "rate"), ("IMU rows", "imurows"), ("Size on Jetson", "size"), ("Free disk (Jetson)", "free")]):
             self._row(grid, i, name, key)
 
     def _row(self, parent, i, name, key, width=18):
@@ -649,11 +654,11 @@ class App:
         f.grid(row=row, column=0, sticky="ew", pady=(0, 4))
         f.columnconfigure(0, weight=1)
         for i, (name, key) in enumerate([("Jetson link", "link"), ("SSH login", "ssh"), ("Capture mode", "mode"),
-                                         ("Camera fps", "fps"), ("Brightness / clipped", "bright"),
+                                         ("Camera fps", "fps"), ("Brightness / clipped", "bright"), ("IMU (Cube Orange)", "imu"),
                                          ("Last recording", "last")]):
             self._row(f, i, name, key, width=26)
         bar = ttk.Frame(f)
-        bar.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        bar.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(bar, text="Start / restart capture on Jetson", command=self._start_jetson).pack(side=tk.LEFT)
         ttk.Button(bar, text="Set up Jetson login (once)", command=self._setup_login).pack(side=tk.LEFT, padx=6)
 
@@ -854,9 +859,10 @@ class App:
                       "(nohup setsid python3 stereo_capture.py --left $D0 --right $D1 --cameras %d --dest %s "
                       "--left-port %d --right-port %d --control-port %d --preview-width %d --preview-fps %d --stream-kbps %d "
                       "--set-ctrl exposure_auto=1 --set-ctrl exposure_absolute=%d --set-ctrl gain=%d --record-fps %d "
+                      "--imu-port auto --imu-rate 100 %s"
                       "> live.log 2>&1 < /dev/null &); sleep 1; echo started"
                       % (1 if mono else 2, me, vp, vp + 2, self.cmd_port(), w, fps, kbps, exp10, int(self.gain_var.get()),
-                         int(self.rate_var.get())))
+                         int(self.rate_var.get()), "" if self.imu_var.get() else "--no-imu-record "))
             r = self._ssh(remote, timeout=40)
             if b"started" in r.stdout:
                 self.log("capture program started on the Jetson (streaming to %s) - video appears in a few seconds" % me)
@@ -886,9 +892,30 @@ class App:
         self.log("a console window opened: type the Jetson password there, then press 'Apply' here")
 
     # -- recording --------------------------------------------------------------------------------------------------
+    def imu_text(self, imu):
+        """(text, colour) describing the Cube / IMU state reported by the Jetson."""
+        if not imu or not imu.get("enabled", False):
+            return "disabled", None
+        state = imu.get("state")
+        if state == "connected":
+            txt = "%.0f Hz  (max gap %d ms)" % (imu.get("hz", 0), imu.get("gap_ms", 0))
+            if imu.get("armed"):
+                txt += "  ARMED"
+            return txt, "#3ec16a"
+        if state == "no permission":
+            return "no access (dialout)", "#ff6b6b"
+        return "Cube not found", "#e0a800"
+
     def _on_start(self):
         if self._countdown_job is not None:
             return
+        st = self.status if self.status and time.time() - self.status_t < STATUS_STALE_S else None
+        if self.imu_var.get() and st is not None and not self.args.test_rec and (st.get("imu") or {}).get("state") != "connected":
+            txt = self.imu_text(st.get("imu"))[0]
+            if not messagebox.askyesno("IMU not connected",
+                                       "The Cube Orange IMU is not available on the Jetson (%s).\n\n"
+                                       "Record the camera only, without the IMU?" % txt):
+                return
         try:
             delay = int(self.delay_var.get())
         except ValueError:
@@ -942,6 +969,19 @@ class App:
             self.status, self.status_t = r, time.time()
             self.log("recording stopped - last: %s" % (r.get("last_dataset") or "?"))
             self._refresh_sets()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_imu_toggle(self):
+        on = bool(self.imu_var.get())
+        self._set_cfg(imu=on)
+
+        def run():
+            r = self.send("imurec %d" % (1 if on else 0), 2.0)
+            if r and r.get("error"):
+                self.log("!! %s" % r["error"])
+                self.root.after(0, lambda: self.imu_var.set(bool((r.get("imu") or {}).get("record", True))))
+            elif r:
+                self.log("IMU recording %s" % ("on" if on else "off"))
         threading.Thread(target=run, daemon=True).start()
 
     def _on_rate(self):
@@ -1145,6 +1185,14 @@ class App:
             self._set("link", "connected (%s)" % st.get("mode", "?"), "#3ec16a")
             self._set("mode", "%s  %s" % (st.get("mode", "?"), " + ".join(st.get("roles", []))))
             self._set("fps", " / ".join("%.0f" % f for f in st.get("fps", [])) + "  (camera)")
+            imu = st.get("imu")
+            txt, col = self.imu_text(imu)
+            self._set("imu", txt, col)
+            if imu and bool(imu.get("record", True)) != bool(self.imu_var.get()) and not st.get("recording") \
+                    and time.time() - getattr(self, "_imu_sync_t", 0) > 3.0:
+                self._imu_sync_t = time.time()           # keep the Jetson in step with the checkbox
+                want = 1 if self.imu_var.get() else 0
+                threading.Thread(target=lambda: self.send("imurec %d" % want, 2.0), daemon=True).start()
             self._set("bright", "  ".join("%d/255  %.1f%%" % (m_, c_) for m_, c_ in zip(st.get("mean", []), st.get("clip_pct", []))))
             ex = st.get("exposure_100us")
             if st.get("recording"):
@@ -1153,13 +1201,14 @@ class App:
                 self._set("elapsed", "%02d:%02d" % (el // 60, el % 60))
                 n = st.get("pairs", 0)
                 self._set("frames", str(n))
+                self._set("imurows", str((st.get("imu") or {}).get("rows", 0)) if (st.get("imu") or {}).get("record") else "off")
                 self._set("rate", "%.0f / s" % (n / el) if el > 1 else "-")
                 self._set("size", "~%.0f MB" % (n * (0.35 if mono else 0.7)))
                 if el > 1 and st.get("record_fps"):
                     self._set("rate", "%.0f / s  (saving %d)" % (n / el, st["record_fps"]))
             else:
                 self._set("state", "idle" if self._countdown_job is None else "starting ...")
-                for k in ("elapsed", "frames", "rate", "size"):
+                for k in ("elapsed", "frames", "rate", "imurows", "size"):
                     self._set(k, "-")
             self._set("free", "%.0f GB" % st.get("free_gb", 0))
             want = int(self.rate_var.get())

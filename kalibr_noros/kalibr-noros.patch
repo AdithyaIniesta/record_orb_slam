@@ -1,0 +1,506 @@
+diff --git a/Schweizer-Messer/python_module/cmake/add_python_export_library.cmake b/Schweizer-Messer/python_module/cmake/add_python_export_library.cmake
+index ccd6093..3b5df0c 100755
+--- a/Schweizer-Messer/python_module/cmake/add_python_export_library.cmake
++++ b/Schweizer-Messer/python_module/cmake/add_python_export_library.cmake
+@@ -86,7 +86,10 @@ ${SETUP_PY_TEXT}
+       list(APPEND BOOST_COMPONENTS python27)
+     endif()
+   else()
+-    list(APPEND BOOST_COMPONENTS python38)
++    # Match the boost_python component to the interpreter we are building for
++    # (python38 on JetPack 5, python310 on JetPack 6 / Ubuntu 22.04).
++    string(REGEX REPLACE "^([0-9]+)\\.([0-9]+).*" "python\\1\\2" _BOOST_PY_COMPONENT "${PYTHONLIBS_VERSION_STRING}")
++    list(APPEND BOOST_COMPONENTS ${_BOOST_PY_COMPONENT})
+   endif()
+   find_package(Boost REQUIRED COMPONENTS ${BOOST_COMPONENTS}) 
+ 
+diff --git a/Schweizer-Messer/sm_boost/include/boost/portable_binary_archive.hpp b/Schweizer-Messer/sm_boost/include/boost/portable_binary_archive.hpp
+index 4efa42c..3d339fe 100755
+--- a/Schweizer-Messer/sm_boost/include/boost/portable_binary_archive.hpp
++++ b/Schweizer-Messer/sm_boost/include/boost/portable_binary_archive.hpp
+@@ -28,7 +28,10 @@
+ #endif
+ 
+ #include <boost/archive/basic_archive.hpp>
+-#include <boost/detail/endian.hpp>
++#include <boost/predef/other/endian.h>
++#if BOOST_ENDIAN_BIG_BYTE && !defined(BOOST_BIG_ENDIAN)
++#define BOOST_BIG_ENDIAN
++#endif
+ 
+ 
+ namespace boost {
+diff --git a/Schweizer-Messer/sm_boost/src/portable_binary_oarchive.cpp b/Schweizer-Messer/sm_boost/src/portable_binary_oarchive.cpp
+index afca220..89cac5c 100755
+--- a/Schweizer-Messer/sm_boost/src/portable_binary_oarchive.cpp
++++ b/Schweizer-Messer/sm_boost/src/portable_binary_oarchive.cpp
+@@ -9,7 +9,10 @@
+ //  See http://www.boost.org for updates, documentation, and revision history.
+ 
+ #include <ostream>
+-#include <boost/detail/endian.hpp>
++#include <boost/predef/other/endian.h>
++#if BOOST_ENDIAN_BIG_BYTE && !defined(BOOST_BIG_ENDIAN)
++#define BOOST_BIG_ENDIAN
++#endif
+ #include <boost/portable_binary_oarchive.hpp>
+ 
+ namespace boost {
+diff --git a/Schweizer-Messer/sm_python/python/sm/PlotCollection.py b/Schweizer-Messer/sm_python/python/sm/PlotCollection.py
+index 82d1060..b705bc3 100755
+--- a/Schweizer-Messer/sm_python/python/sm/PlotCollection.py
++++ b/Schweizer-Messer/sm_python/python/sm/PlotCollection.py
+@@ -1,11 +1,16 @@
+ # import wxversion
+ # wxversion.ensureMinimal('2.8')
+ 
+-import wx
+-import wx.aui
++try:  # the wx GUI is optional: headless machines (e.g. a Jetson) just skip showing windows
++    import wx
++    import wx.aui
++    from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as Canvas
++    from matplotlib.backends.backend_wx import NavigationToolbar2Wx as Toolbar
++    HAVE_WX = True
++except ImportError:
++    wx = None
++    HAVE_WX = False
+ import matplotlib as mpl
+-from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as Canvas
+-from matplotlib.backends.backend_wx import NavigationToolbar2Wx as Toolbar
+ import collections
+ 
+ class PlotCollection:
+@@ -54,6 +59,9 @@ class PlotCollection:
+         """
+         if len(list(self.figureList.keys())) == 0:
+             return
++        if not HAVE_WX:
++            print("PlotCollection: wx is not installed, not opening the plot window.")
++            return
+         app = wx.App()
+         frame = wx.Frame(None,-1,self.frame_name, size=self.window_size)
+         plotter = self.PlotNotebook(frame)
+@@ -62,7 +70,7 @@ class PlotCollection:
+         frame.Show()
+         app.MainLoop()
+         
+-    class Plot(wx.Panel):
++    class Plot(wx.Panel if HAVE_WX else object):
+         def __init__(self, parent, fig, id = -1, dpi = None, **kwargs):
+             wx.Panel.__init__(self, parent, id=id, **kwargs)
+             fig.set_figheight(2)
+@@ -76,7 +84,7 @@ class PlotCollection:
+             sizer.Add(self.toolbar, 0 , wx.LEFT | wx.EXPAND)
+             self.SetSizer(sizer)
+     
+-    class PlotNotebook(wx.Panel):
++    class PlotNotebook(wx.Panel if HAVE_WX else object):
+         def __init__(self, parent, id = -1):
+             wx.Panel.__init__(self, parent, id=id)
+             self.nb = wx.aui.AuiNotebook(self)
+diff --git a/aslam_cv/aslam_cv_backend_python/python/aslam_cv_backend/__init__.py b/aslam_cv/aslam_cv_backend_python/python/aslam_cv_backend/__init__.py
+index a144e1f..aa888dc 100644
+--- a/aslam_cv/aslam_cv_backend_python/python/aslam_cv_backend/__init__.py
++++ b/aslam_cv/aslam_cv_backend_python/python/aslam_cv_backend/__init__.py
+@@ -1,10 +1,10 @@
+ # Import the numpy to Eigen type conversion.
+-import roslib; roslib.load_manifest('numpy_eigen'); import numpy_eigen
++import numpy_eigen
+ # Import the sm library
+-import roslib; roslib.load_manifest('sm_python'); import sm
++import sm
+ # Import the aslam backend
+-import roslib; roslib.load_manifest('aslam_backend'); import aslam_backend
+-import roslib; roslib.load_manifest('aslam_cv_python'); import aslam_cv
++import aslam_backend
++import aslam_cv
+ # Import the the C++ exports from your package library.
+ from .libaslam_cv_backend_python import *
+ # Import other files in the directory
+diff --git a/aslam_incremental_calibration/incremental_calibration_python/src/incremental_calibration/__init__.py b/aslam_incremental_calibration/incremental_calibration_python/src/incremental_calibration/__init__.py
+index 7ec60b3..6237e0d 100644
+--- a/aslam_incremental_calibration/incremental_calibration_python/src/incremental_calibration/__init__.py
++++ b/aslam_incremental_calibration/incremental_calibration_python/src/incremental_calibration/__init__.py
+@@ -1,11 +1,11 @@
+ # Import the numpy to Eigen type conversion.
+-import roslib; roslib.load_manifest('numpy_eigen'); import numpy_eigen
++import numpy_eigen
+ import os
+ 
+ isCompiled = False
+ pathToSo = os.path.dirname(os.path.realpath(__file__))
+ if os.path.isfile(os.path.join(pathToSo,"libincremental_calibration_python.so")):    
+-    roslib.load_manifest('aslam_backend_python'); import aslam_backend
++    import aslam_backend
+     # Import the the C++ exports from your package library.
+     from .libincremental_calibration_python import *
+     # Import other files in the directory
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_calibrate_cameras b/aslam_offline_calibration/kalibr/python/kalibr_calibrate_cameras
+index dc6a909..ec5692c 100755
+--- a/aslam_offline_calibration/kalibr/python/kalibr_calibrate_cameras
++++ b/aslam_offline_calibration/kalibr/python/kalibr_calibrate_cameras
+@@ -1,7 +1,5 @@
+ #!/usr/bin/env python
+ print("importing libraries")
+-import rosbag
+-import cv_bridge
+ 
+ import sm
+ from sm import PlotCollection
+@@ -26,7 +24,10 @@ np.set_printoptions(suppress=True)
+ def initBagDataset(bagfile, topic, from_to, freq):
+     print("\tDataset:          {0}".format(bagfile))
+     print("\tTopic:            {0}".format(topic))
+-    reader = kc.BagImageDatasetReader(bagfile, topic, bag_from_to=from_to, bag_freq=freq)
++    if os.path.isdir(bagfile):
++        reader = kc.FolderImageDatasetReader(bagfile, topic, bag_from_to=from_to, bag_freq=freq)
++    else:
++        reader = kc.BagImageDatasetReader(bagfile, topic, bag_from_to=from_to, bag_freq=freq)
+     print("\tNumber of images: {0}".format(reader.numImages()))
+     return reader
+ 
+@@ -70,6 +71,7 @@ def parseArgs():
+     
+     %(prog)s --models omni-radtan pinhole-equi --target aprilgrid.yaml \\
+               --bag MYROSBAG.bag --topics /cam0/image_raw /cam1/image_raw
++    or, without ROS:  --bag DATASET_DIR --topics cam0 cam1   (DATASET_DIR/cam0/<timestamp_ns>.png ...)
+     
+     example aprilgrid.yaml:
+         target_type: 'aprilgrid'
+@@ -408,7 +410,7 @@ def main():
+                 pl.show()
+             
+             #write to file
+-            bagtag = os.path.splitext(parsed.bagfile)[0]
++            bagtag = os.path.normpath(parsed.bagfile) if os.path.isdir(parsed.bagfile) else os.path.splitext(parsed.bagfile)[0]
+             resultFile = bagtag + "-camchain.yaml"
+             kcc.saveChainParametersYaml(calibrator, resultFile, graph)
+             print("Results written to:")
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_calibrate_imu_camera b/aslam_offline_calibration/kalibr/python/kalibr_calibrate_imu_camera
+index ca14c6a..db52abd 100755
+--- a/aslam_offline_calibration/kalibr/python/kalibr_calibrate_imu_camera
++++ b/aslam_offline_calibration/kalibr/python/kalibr_calibrate_imu_camera
+@@ -95,6 +95,8 @@ def parseArgs():
+     groupOpt.add_argument('--max-iter', type=int, default=30, dest='max_iter', help='Max. iterations (default: %(default)s)', required=False)
+     groupOpt.add_argument('--recover-covariance', action='store_true', dest='recover_cov', help='Recover the covariance of the design variables.', required=False)
+     groupOpt.add_argument('--timeoffset-padding', type=float, default=30.e-3, dest='timeoffset_padding', help='Maximum range in which the timeoffset may change during estimation [s] (default: %(default)s)', required=False)
++    groupOpt.add_argument('--pose-knots-per-second', type=int, default=100, dest='pose_knots', help='Knots per second of the pose spline. Keep it at or below the IMU rate: with more knots than IMU samples the spline fits the IMU exactly and the extrinsics become unconstrained (default: %(default)s)', required=False)
++    groupOpt.add_argument('--bias-knots-per-second', type=int, default=50, dest='bias_knots', help='Knots per second of the bias splines (default: %(default)s)', required=False)
+ 
+     #Result options  
+     outputSettings = parser.add_argument_group('Output options')
+@@ -186,8 +188,8 @@ def main():
+     print("")
+     print("Building the problem")
+     iCal.buildProblem(splineOrder=6, 
+-                      poseKnotsPerSecond=100, 
+-                      biasKnotsPerSecond=50, 
++                      poseKnotsPerSecond=parsed.pose_knots, 
++                      biasKnotsPerSecond=parsed.bias_knots, 
+                       doPoseMotionError=False,
+                       doBiasMotionError=True,
+                       blakeZisserCam=-1,
+@@ -215,7 +217,7 @@ def main():
+     util.printResults(iCal, withCov=parsed.recover_cov)
+     print("")
+ 
+-    bagtag = os.path.splitext(parsed.bagfile[0])[0]
++    bagtag = os.path.normpath(parsed.bagfile[0]) if os.path.isdir(parsed.bagfile[0]) else os.path.splitext(parsed.bagfile[0])[0]
+     yamlFilename = bagtag + "-camchain-imucam.yaml"
+     iCal.saveCamChainParametersYaml(yamlFilename)
+     print("Results written to:")
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_camera_calibration/MulticamGraph.py b/aslam_offline_calibration/kalibr/python/kalibr_camera_calibration/MulticamGraph.py
+index 757c8e6..1e0c8ec 100644
+--- a/aslam_offline_calibration/kalibr/python/kalibr_camera_calibration/MulticamGraph.py
++++ b/aslam_offline_calibration/kalibr/python/kalibr_camera_calibration/MulticamGraph.py
+@@ -310,6 +310,7 @@ class MulticamCalibrationGraph(object):
+         else:
+             target = "/tmp/graph.png"
+ 
++        self.G.es["curved"] = False  # newer python-igraph looks this attribute up when drawing edge labels
+         plot = igraph.plot(self.G, 
+                            layout=layout, 
+                            rescale=False, 
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_common/ImageDatasetReader.py b/aslam_offline_calibration/kalibr/python/kalibr_common/ImageDatasetReader.py
+index 776f7d8..3da2754 100644
+--- a/aslam_offline_calibration/kalibr/python/kalibr_common/ImageDatasetReader.py
++++ b/aslam_offline_calibration/kalibr/python/kalibr_common/ImageDatasetReader.py
+@@ -1,7 +1,12 @@
+-import cv_bridge
++try:  # ROS is optional: only needed to read rosbags
++  import cv_bridge
++  import rosbag
++except ImportError:
++  cv_bridge = None
++  rosbag = None
+ import cv2
+-import rosbag
+ import os
++import glob
+ import numpy as np
+ import pylab as pl
+ import aslam_cv as acv
+@@ -35,6 +40,9 @@ class BagImageDatasetReader(object):
+     self.bagfile = bagfile
+     self.topic = imagetopic
+     self.perform_synchronization = perform_synchronization
++    if rosbag is None:
++      raise RuntimeError("Reading a rosbag needs ROS (rosbag/cv_bridge). Pass a folder of images instead "
++                         "(--bag DIR with one subfolder per camera, e.g. DIR/cam0/<timestamp_ns>.png).")
+     self.bag = rosbag.Bag(bagfile)
+     self.uncompress = None
+     if imagetopic is None:
+@@ -206,3 +214,114 @@ class BagImageDatasetReader(object):
+         "Unsupported Image Type: '{}'\nSupported are: "
+         "mv_cameras/ImageSnappyMsg, sensor_msgs/CompressedImage, sensor_msgs/Image".format(data._type))
+     return (timestamp, img_data)
++
++
++IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pgm")
++
++
++def _timestampFromName(path, fallback_index):
++  """Filename stem -> (secs, nsecs). Digits only = integer nanoseconds (EuRoC),
++  containing a '.' = float seconds. Anything else = frame order at 10 Hz."""
++  stem = os.path.splitext(os.path.basename(path))[0]
++  if stem.isdigit():
++    ns = int(stem)
++    return ns // 1000000000, ns % 1000000000, True
++  try:
++    t = float(stem)
++    secs = int(t)
++    return secs, int(round((t - secs) * 1e9)), True
++  except ValueError:
++    return fallback_index // 10, (fallback_index % 10) * 100000000, False
++
++
++class FolderImageDatasetReader(object):
++  """Drop-in replacement for BagImageDatasetReader that reads a directory of images.
++
++  The 'topic' is the name of a subfolder of 'folder' (e.g. cam0). Images in different
++  camera folders are matched by timestamp, so name the files with the capture time
++  (nanoseconds or float seconds) and use the same name for frames taken together.
++  """
++
++  def __init__(self, folder, imagetopic, bag_from_to=None, perform_synchronization=False, bag_freq=None):
++    self.bagfile = folder
++    self.topic = imagetopic
++    if imagetopic is None:
++      raise RuntimeError("Please pass the camera subfolder name (e.g. cam0) as the topic.")
++    # '/cam0/image_raw' or 'cam0' -> folder/cam0, folder/cam0/data or folder/mav0/cam0/data (EuRoC layout)
++    from .ImuDatasetReader import resolveTopicPath
++    def _has_images(d):
++      return os.path.isdir(d) and any(f.lower().endswith(IMAGE_EXTENSIONS) for f in os.listdir(d))
++    camdir = resolveTopicPath(folder, imagetopic, _has_images)
++    if camdir is None:
++      raise RuntimeError("Could not find images for camera topic {0} in {1} (looked for {2}, {2}/data, "
++                         "mav0/{2}/data)".format(imagetopic, folder, imagetopic.strip("/").split("/")[0]))
++    files = sorted(f for f in glob.glob(os.path.join(camdir, "*")) if f.lower().endswith(IMAGE_EXTENSIONS))
++    if not files:
++      raise RuntimeError("No images found in {0}".format(camdir))
++
++    entries = []
++    named = 0
++    for i, f in enumerate(files):
++      secs, nsecs, from_name = _timestampFromName(f, i)
++      named += from_name
++      entries.append((secs * 1000000000 + nsecs, secs, nsecs, f))
++    if named != len(files):
++      sm.logWarn("FolderImageDatasetReader: {0} has non-numeric filenames; using file order "
++                 "as time (frames are paired across cameras by index).".format(camdir))
++    entries.sort()
++    self.entries = entries
++    self.indices = np.arange(len(entries))
++
++    if bag_from_to:
++      self.indices = self.truncateIndicesFromTime(self.indices, bag_from_to)
++    if bag_freq:
++      self.indices = self.truncateIndicesFromFreq(self.indices, bag_freq)
++
++  def _t(self, idx):
++    return self.entries[idx][0] / 1.0e9
++
++  def truncateIndicesFromTime(self, indices, bag_from_to):
++    if bag_from_to[0] >= bag_from_to[1]:
++      raise RuntimeError("Start time must be smaller than end time.")
++    start = self._t(0)
++    valid = [i for i in indices if start + bag_from_to[0] <= self._t(i) <= start + bag_from_to[1]]
++    sm.logWarn("FolderImageDatasetReader: truncated {0} / {1} images (from-to).".format(len(indices) - len(valid), len(indices)))
++    return np.array(valid, dtype=int)
++
++  def truncateIndicesFromFreq(self, indices, freq):
++    if freq < 0.0:
++      raise RuntimeError("Frequency {0} Hz is smaller 0".format(freq))
++    last = None
++    valid = []
++    for i in indices:
++      t = self._t(i)
++      if last is None or (t - last) >= 1.0 / freq:
++        last = t
++        valid.append(i)
++    sm.logWarn("FolderImageDatasetReader: truncated {0} / {1} images (frequency)".format(len(indices) - len(valid), len(indices)))
++    return np.array(valid, dtype=int)
++
++  def __iter__(self):
++    return self.readDataset()
++
++  def readDataset(self):
++    return BagImageDatasetReaderIterator(self, self.indices)
++
++  def readDatasetShuffle(self):
++    indices = np.array(self.indices)
++    np.random.shuffle(indices)
++    return BagImageDatasetReaderIterator(self, indices)
++
++  def numImages(self):
++    return len(self.indices)
++
++  def getImage(self, idx):
++    _, secs, nsecs, path = self.entries[idx]
++    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
++    if img is None:
++      raise RuntimeError("Could not read image {0}".format(path))
++    if img.dtype == np.uint16:
++      img = (img / 256).astype("uint8")
++    if img.ndim == 3:
++      img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY if img.shape[2] == 4 else cv2.COLOR_BGR2GRAY)
++    return (acv.Time(secs, nsecs), img)
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_common/ImuDatasetReader.py b/aslam_offline_calibration/kalibr/python/kalibr_common/ImuDatasetReader.py
+index 9f00748..84fa1d1 100644
+--- a/aslam_offline_calibration/kalibr/python/kalibr_common/ImuDatasetReader.py
++++ b/aslam_offline_calibration/kalibr/python/kalibr_common/ImuDatasetReader.py
+@@ -1,4 +1,7 @@
+-import rosbag
++try:
++  import rosbag
++except ImportError:
++  rosbag = None
+ import os
+ import sm
+ import numpy as np
+@@ -119,5 +122,80 @@ class BagImuDatasetReader(object):
+             timestamp = acv.Time( data.header.stamp.secs, data.header.stamp.nsecs )
+         omega = np.array( [data.angular_velocity.x, data.angular_velocity.y, data.angular_velocity.z])
+         alpha = np.array( [data.linear_acceleration.x, data.linear_acceleration.y, data.linear_acceleration.z] )
+-        
++
+         return (timestamp, omega, alpha)
++
++
++def resolveTopicPath(folder, topic, wanted):
++    """Find the directory for a ROS-style topic inside a dataset folder (no ROS needed).
++
++    '/imu0' (or '/cam0/image_raw') is looked up as folder/imu0 and folder/mav0/imu0 (EuRoC layout), each
++    optionally with a 'data' subfolder. 'wanted' says whether a candidate directory is the right one.
++    """
++    names = [n for n in topic.strip("/").split("/") if n]
++    for base in (folder, os.path.join(folder, "mav0")):
++        for n in names:
++            for sub in ("", "data"):
++                cand = os.path.join(base, n, sub) if sub else os.path.join(base, n)
++                if wanted(cand):
++                    return cand
++    return None
++
++
++class FolderImuDatasetReader(object):
++    """Drop-in replacement for BagImuDatasetReader that reads a EuRoC-style IMU csv (no ROS).
++
++    The 'topic' names the IMU folder (e.g. /imu0). The file is imu0/data.csv (or mav0/imu0/data.csv) with columns
++        timestamp [ns], w_x, w_y, w_z [rad/s], a_x, a_y, a_z [m/s^2]
++    and '#' header lines. Samples are sorted by time and samples whose time does not increase are dropped.
++    """
++
++    def __init__(self, folder, imutopic, bag_from_to=None, perform_synchronization=False):
++        self.bagfile = folder
++        self.topic = imutopic
++        if imutopic is None:
++            raise RuntimeError("Please pass the IMU folder name (e.g. /imu0) as the topic.")
++        csvdir = resolveTopicPath(folder, imutopic, lambda d: os.path.isfile(os.path.join(d, "data.csv")))
++        if csvdir is None:
++            raise RuntimeError("Could not find {0}/data.csv for IMU topic {1} in {2}".format(
++                imutopic.strip("/"), imutopic, folder))
++        raw = np.loadtxt(os.path.join(csvdir, "data.csv"), delimiter=",", comments="#", ndmin=2)
++        if raw.shape[1] < 7:
++            raise RuntimeError("{0}: expected 7 columns (t_ns, w xyz, a xyz), found {1}".format(csvdir, raw.shape[1]))
++        raw = raw[np.argsort(raw[:, 0], kind="stable")]
++        keep = np.concatenate(([True], np.diff(raw[:, 0]) > 0))
++        if not keep.all():
++            sm.logWarn("FolderImuDatasetReader: dropped {0} samples whose timestamp did not increase.".format(int((~keep).sum())))
++        self.data = raw[keep]
++        self.indices = np.arange(len(self.data))
++        if bag_from_to:
++            self.indices = self.truncateIndicesFromTime(self.indices, bag_from_to)
++        self.index = self.indices          # the calibrator prints len(reader.index)
++
++    def truncateIndicesFromTime(self, indices, bag_from_to):
++        if bag_from_to[0] >= bag_from_to[1]:
++            raise RuntimeError("Start time must be smaller than end time.")
++        t = self.data[:, 0] / 1.0e9
++        start = t[0]
++        valid = [i for i in indices if start + bag_from_to[0] <= t[i] <= start + bag_from_to[1]]
++        sm.logWarn("FolderImuDatasetReader: truncated {0} / {1} messages.".format(len(indices) - len(valid), len(indices)))
++        return np.array(valid, dtype=int)
++
++    def __iter__(self):
++        return self.readDataset()
++
++    def readDataset(self):
++        return BagImuDatasetReaderIterator(self, self.indices)
++
++    def readDatasetShuffle(self):
++        indices = np.array(self.indices)
++        np.random.shuffle(indices)
++        return BagImuDatasetReaderIterator(self, indices)
++
++    def numMessages(self):
++        return len(self.indices)
++
++    def getMessage(self, idx):
++        row = self.data[idx]
++        ns = int(round(row[0]))
++        return (acv.Time(ns // 1000000000, ns % 1000000000), np.array(row[1:4]), np.array(row[4:7]))
+diff --git a/aslam_offline_calibration/kalibr/python/kalibr_imu_camera_calibration/IccSensors.py b/aslam_offline_calibration/kalibr/python/kalibr_imu_camera_calibration/IccSensors.py
+index a7238ff..b8b7808 100644
+--- a/aslam_offline_calibration/kalibr/python/kalibr_imu_camera_calibration/IccSensors.py
++++ b/aslam_offline_calibration/kalibr/python/kalibr_imu_camera_calibration/IccSensors.py
+@@ -11,6 +11,7 @@ from . import IccCalibrator as ic
+ from .IccCalibrator import *
+ 
+ import cv2
++import os
+ import sys
+ import math
+ import numpy as np
+@@ -19,6 +20,15 @@ import scipy.optimize
+ 
+ 
+ def initCameraBagDataset(bagfile, topic, from_to, freq, perform_synchronization):
++    # --bag may be a folder (EuRoC layout, no ROS needed) instead of a rosbag
++    if os.path.isdir(bagfile):
++        print("Initializing camera folder dataset reader:")
++        print("\tDataset:          {0}".format(bagfile))
++        print("\tTopic:            {0}".format(topic))
++        reader = kc.FolderImageDatasetReader(bagfile, topic, bag_from_to=from_to, bag_freq=freq, \
++                                             perform_synchronization=perform_synchronization)
++        print("\tNumber of images: {0}".format(reader.numImages()))
++        return reader
+     print("Initializing camera rosbag dataset reader:")
+     print("\tDataset:          {0}".format(bagfile))
+     print("\tTopic:            {0}".format(topic))
+@@ -28,6 +38,14 @@ def initCameraBagDataset(bagfile, topic, from_to, freq, perform_synchronization)
+     return reader
+ 
+ def initImuBagDataset(bagfile, topic, from_to=None, perform_synchronization=False):
++    if os.path.isdir(bagfile):
++        print("Initializing imu folder dataset reader:")
++        print("\tDataset:          {0}".format(bagfile))
++        print("\tTopic:            {0}".format(topic))
++        reader = kc.FolderImuDatasetReader(bagfile, topic, bag_from_to=from_to, \
++                                           perform_synchronization=perform_synchronization)
++        print("\tNumber of messages: {0}".format(reader.numMessages()))
++        return reader
+     print("Initializing imu rosbag dataset reader:")
+     print("\tDataset:          {0}".format(bagfile))
+     print("\tTopic:            {0}".format(topic))

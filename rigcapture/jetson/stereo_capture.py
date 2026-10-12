@@ -35,12 +35,14 @@ anchors only for reference.
 """
 import argparse
 import collections
+import glob
 import json
 import os
 import select
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -63,7 +65,7 @@ except Exception as e:  # pragma: no cover
 Gst.init(None)
 
 NS = 1000000000
-API_VERSION = 3      # bumped when the status/command interface changes; the PC app upgrades older ones
+API_VERSION = 5      # bumped when the status/command interface changes; the PC app upgrades older ones
 
 
 # ----------------------------------------------------------------------------
@@ -425,7 +427,7 @@ class DatasetWriter(object):
             "record_fps": a.record_fps, "png_compression": a.png_level,
             "timestamps": "CLOCK_MONOTONIC ns (V4L2 buffer time)",
             "clock_anchor": self.clock_anchor,
-            "imu": "not recorded (mav0/imu0 reserved for the Cube Orange)",
+            "imu": getattr(self, "imu_info", None) or "not recorded",
             "note": a.note, "argv": sys.argv, "sim": a.sim,
             "complete": final,
         }
@@ -591,6 +593,569 @@ class Preview(threading.Thread):
             self.pipe.set_state(Gst.State.NULL)
 
 
+
+# ----------------------------------------------------------------------------
+# IMU from a Cube Orange (ArduPilot) over MAVLink - Python standard library only
+# (no pymavlink / pyserial needed on the Jetson). Frames are verified with the CRC byte of every message ArduPilot
+# can send, so the stream re-synchronises by itself after any garbage.
+# ----------------------------------------------------------------------------
+MAVLINK_CRC_EXTRA = {
+    0: 50, 1: 124, 2: 137, 4: 237, 5: 217, 6: 104, 7: 119, 11: 89,
+    20: 214, 21: 159, 22: 220, 23: 168, 24: 24, 25: 23, 26: 170, 27: 144,
+    28: 67, 29: 115, 30: 39, 31: 246, 32: 185, 33: 104, 34: 237, 35: 244,
+    36: 222, 37: 212, 38: 9, 39: 254, 40: 230, 41: 28, 42: 28, 43: 132,
+    44: 221, 45: 232, 46: 11, 47: 153, 48: 41, 49: 39, 50: 78, 51: 196,
+    54: 15, 55: 3, 61: 167, 62: 183, 63: 119, 64: 191, 65: 118, 66: 148,
+    67: 21, 69: 243, 70: 124, 73: 38, 74: 20, 75: 158, 76: 152, 77: 143,
+    81: 106, 82: 49, 83: 22, 84: 143, 85: 140, 86: 5, 87: 150, 89: 231,
+    90: 183, 91: 63, 92: 54, 93: 47, 100: 175, 101: 102, 102: 158, 103: 208,
+    104: 56, 105: 93, 106: 138, 107: 108, 108: 32, 109: 185, 110: 84, 111: 34,
+    112: 174, 113: 124, 114: 237, 115: 4, 116: 76, 117: 128, 118: 56, 119: 116,
+    120: 134, 121: 237, 122: 203, 123: 250, 124: 87, 125: 203, 126: 220, 127: 25,
+    128: 226, 129: 46, 130: 29, 131: 223, 132: 85, 133: 6, 134: 229, 135: 203,
+    136: 1, 137: 195, 138: 109, 139: 168, 140: 181, 141: 47, 142: 72, 143: 131,
+    144: 127, 146: 103, 147: 154, 148: 178, 149: 200, 150: 134, 151: 219, 152: 208,
+    153: 188, 154: 84, 155: 22, 156: 19, 157: 21, 158: 134, 160: 78, 161: 68,
+    162: 189, 163: 127, 164: 154, 165: 21, 166: 21, 167: 144, 168: 1, 169: 234,
+    170: 73, 171: 181, 172: 22, 173: 83, 174: 167, 175: 138, 176: 234, 177: 240,
+    178: 47, 179: 189, 180: 52, 181: 174, 182: 229, 183: 85, 184: 159, 185: 186,
+    186: 72, 191: 92, 192: 36, 193: 71, 194: 98, 195: 120, 200: 134, 201: 205,
+    214: 69, 215: 101, 216: 50, 217: 202, 218: 17, 219: 162, 225: 208, 226: 207,
+    230: 163, 231: 105, 232: 151, 233: 35, 234: 150, 235: 179, 241: 90, 242: 104,
+    243: 85, 244: 95, 245: 130, 246: 184, 247: 81, 248: 8, 249: 204, 250: 49,
+    251: 170, 252: 44, 253: 83, 254: 46, 256: 71, 257: 131, 258: 187, 259: 92,
+    260: 146, 261: 179, 262: 12, 263: 133, 264: 49, 265: 26, 266: 193, 267: 35,
+    268: 14, 269: 109, 270: 59, 271: 22, 275: 126, 276: 18, 277: 62, 280: 70,
+    281: 48, 282: 123, 283: 74, 284: 99, 285: 137, 286: 210, 287: 1, 288: 20,
+    295: 234, 296: 158, 299: 19, 301: 243, 310: 28, 311: 95, 320: 243, 321: 88,
+    322: 243, 323: 78, 324: 132, 330: 23, 331: 91, 332: 236, 333: 231, 335: 225,
+    339: 199, 340: 99, 345: 209, 350: 232, 360: 11, 370: 75, 373: 117, 375: 251,
+    376: 199, 385: 147, 386: 132, 387: 4, 388: 8, 390: 156, 9000: 113, 9005: 117,
+    10001: 209, 10002: 186, 10003: 4, 10004: 133, 10005: 103, 10006: 193, 10007: 71, 10008: 240,
+    10151: 195, 11000: 134, 11001: 15, 11002: 234, 11003: 64, 11004: 11, 11005: 93, 11010: 46,
+    11011: 106, 11020: 205, 11030: 144, 11031: 133, 11032: 85, 11033: 195, 11034: 79, 11035: 128,
+    11036: 177, 11037: 130, 11038: 47, 11039: 142, 11040: 132, 11041: 208, 11042: 201, 11043: 193,
+    11044: 189, 11060: 162, 12900: 114, 12901: 254, 12902: 140, 12903: 249, 12904: 77, 12905: 49,
+    12915: 94, 12918: 139, 12919: 7, 12920: 20, 42000: 227, 42001: 239, 50001: 246, 50002: 181,
+    50003: 62, 50004: 240, 50005: 152, 52000: 13, 52001: 239,
+}
+
+# id: (name, struct format, field names in wire order) - taken from pymavlink's ardupilotmega dialect
+MAVLINK_MSGS = {
+    0: ('HEARTBEAT', '<IBBBBB', ('custom_mode', 'type', 'autopilot', 'base_mode', 'system_status', 'mavlink_version')),
+    27: ('RAW_IMU', '<QhhhhhhhhhBh', ('time_usec', 'xacc', 'yacc', 'zacc', 'xgyro', 'ygyro', 'zgyro', 'xmag', 'ymag', 'zmag', 'id', 'temperature')),
+    30: ('ATTITUDE', '<Iffffff', ('time_boot_ms', 'roll', 'pitch', 'yaw', 'rollspeed', 'pitchspeed', 'yawspeed')),
+    76: ('COMMAND_LONG', '<fffffffHBBB', ('param1', 'param2', 'param3', 'param4', 'param5', 'param6', 'param7', 'command', 'target_system', 'target_component', 'confirmation')),
+    77: ('COMMAND_ACK', '<HBBiBB', ('command', 'result', 'progress', 'result_param2', 'target_system', 'target_component')),
+    111: ('TIMESYNC', '<qq', ('tc1', 'ts1')),
+    116: ('SCALED_IMU2', '<Ihhhhhhhhhh', ('time_boot_ms', 'xacc', 'yacc', 'zacc', 'xgyro', 'ygyro', 'zgyro', 'xmag', 'ymag', 'zmag', 'temperature')),
+    129: ('SCALED_IMU3', '<Ihhhhhhhhhh', ('time_boot_ms', 'xacc', 'yacc', 'zacc', 'xgyro', 'ygyro', 'zgyro', 'xmag', 'ymag', 'zmag', 'temperature')),
+}
+MAVLINK_SIZE = dict((k, struct.calcsize(v[1])) for k, v in MAVLINK_MSGS.items())
+MAV_CMD_SET_MESSAGE_INTERVAL = 511
+G_MSS = 9.80665
+IMU_STREAMS = (("RAW_IMU", "imu0", 27), ("SCALED_IMU2", "imu1", 116), ("SCALED_IMU3", "imu2", 129))
+ATTITUDE_ID = 30
+ACK_NAMES = {0: "ACCEPTED", 1: "TEMPORARILY_REJECTED", 2: "DENIED", 3: "UNSUPPORTED", 4: "FAILED", 5: "IN_PROGRESS"}
+
+
+def x25(data, crc=0xFFFF):
+    for b in data:
+        tmp = b ^ (crc & 0xFF)
+        tmp = (tmp ^ (tmp << 4)) & 0xFF
+        crc = ((crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)) & 0xFFFF
+    return crc
+
+
+class MavParser(object):
+    """Incremental MAVLink 1/2 frame parser. feed(bytes) -> [(msgid, sysid, compid, payload_bytes)] for valid frames."""
+
+    def __init__(self):
+        self.buf = bytearray()
+        self.bad = 0
+
+    def feed(self, data):
+        buf = self.buf
+        buf.extend(data)
+        out = []
+        pos = 0
+        n = len(buf)
+        while pos < n:
+            b = buf[pos]
+            if b == 0xFD:                                   # MAVLink 2
+                if n - pos < 12:
+                    break
+                plen = buf[pos + 1]
+                total = 10 + plen + 2 + (13 if buf[pos + 2] & 1 else 0)   # incompat flag 1 = signed frame
+                if n - pos < total:
+                    break
+                msgid = buf[pos + 7] | (buf[pos + 8] << 8) | (buf[pos + 9] << 16)
+                extra = MAVLINK_CRC_EXTRA.get(msgid)
+                crc_rx = buf[pos + 10 + plen] | (buf[pos + 11 + plen] << 8)
+                if extra is not None and x25(bytes(buf[pos + 1:pos + 10 + plen]) + bytes([extra])) == crc_rx:
+                    out.append((msgid, buf[pos + 5], buf[pos + 6], bytes(buf[pos + 10:pos + 10 + plen])))
+                    pos += total
+                    continue
+                self.bad += 1
+                pos += 1
+            elif b == 0xFE:                                 # MAVLink 1
+                if n - pos < 8:
+                    break
+                plen = buf[pos + 1]
+                total = 6 + plen + 2
+                if n - pos < total:
+                    break
+                msgid = buf[pos + 5]
+                extra = MAVLINK_CRC_EXTRA.get(msgid)
+                crc_rx = buf[pos + 6 + plen] | (buf[pos + 7 + plen] << 8)
+                if extra is not None and x25(bytes(buf[pos + 1:pos + 6 + plen]) + bytes([extra])) == crc_rx:
+                    out.append((msgid, buf[pos + 3], buf[pos + 4], bytes(buf[pos + 6:pos + 6 + plen])))
+                    pos += total
+                    continue
+                self.bad += 1
+                pos += 1
+            else:
+                pos += 1
+        del buf[:pos]
+        if len(buf) > 4096:                                 # never let garbage pile up
+            del buf[:-512]
+        return out
+
+
+def mav_decode(msgid, payload):
+    """payload -> dict of fields for the messages in MAVLINK_MSGS (MAVLink 2 zero-trims the payload, so pad it)."""
+    spec = MAVLINK_MSGS.get(msgid)
+    if spec is None:
+        return None
+    size = MAVLINK_SIZE[msgid]
+    p = payload[:size].ljust(size, b"\0")
+    return dict(zip(spec[2], struct.unpack(spec[1], p)))
+
+
+def mav_pack2(msgid, payload, seq, sysid=255, compid=191):
+    """MAVLink 2 frame (zero-trimmed payload, unsigned). Defaults: system 255, component 191 (onboard computer)."""
+    p = bytes(payload).rstrip(b"\0") or bytes(payload[:1])
+    hdr = struct.pack("<BBBBBB", len(p), 0, 0, seq & 0xFF, sysid, compid) + struct.pack("<I", msgid)[:3]
+    crc = x25(hdr + p + bytes([MAVLINK_CRC_EXTRA[msgid]]))
+    return b"\xFD" + hdr + p + struct.pack("<H", crc)
+
+
+class SerialPort(object):
+    """Raw serial port with the standard library (works for USB CDC-ACM; the baud rate is irrelevant there)."""
+
+    def __init__(self, dev, baud=115200):
+        import termios
+        import tty
+        self.dev = dev
+        self.fd = os.open(dev, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            tty.setraw(self.fd)
+            attrs = termios.tcgetattr(self.fd)
+            attrs[2] |= termios.CLOCAL | termios.CREAD
+            speed = getattr(termios, "B%d" % baud, termios.B115200)
+            attrs[4] = attrs[5] = speed
+            termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        except Exception:
+            os.close(self.fd)
+            raise
+
+    def read(self, timeout=0.05):
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return b""
+        try:
+            data = os.read(self.fd, 4096)
+        except BlockingIOError:
+            return b""
+        if not data:
+            raise OSError("serial port closed")
+        return data
+
+    def write(self, data):
+        while data:
+            try:
+                n = os.write(self.fd, data)
+            except BlockingIOError:
+                select.select([], [self.fd], [], 0.1)
+                continue
+            data = data[n:]
+
+    def close(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+EUROC_IMU_HEADER = ("#timestamp [ns],w_RS_S_x [rad s^-1],w_RS_S_y [rad s^-1],w_RS_S_z [rad s^-1],"
+                    "a_RS_S_x [m s^-2],a_RS_S_y [m s^-2],a_RS_S_z [m s^-2]\n")
+
+
+class ImuRecorder(threading.Thread):
+    """Reads a Cube Orange over MAVLink, keeps IMU statistics for the PC app, and (while recording) writes
+    <dataset>/mav0/imu0 (IMU1 = RAW_IMU), imu1 (IMU2), imu2 (IMU3) in EuRoC format plus mav0/cube/{attitude,timesync}.csv.
+
+    Timestamps in data.csv are this computer's CLOCK_MONOTONIC (the same clock as the camera frame times); the Cube's own
+    time stamps and the raw arrival times are in data_fc.csv, and timesync.csv holds TIMESYNC round trips (diagnostics).
+
+    Toward the vehicle it only sends MAV_CMD_SET_MESSAGE_INTERVAL (telemetry rates on this link; reset at Cube reboot;
+    asked back to default on shutdown) and TIMESYNC. Never arms, never writes parameters; rate requests are skipped
+    while the vehicle is armed."""
+
+    def __init__(self, port_arg, rate_hz, record, log=print):
+        threading.Thread.__init__(self, name="imu", daemon=True)
+        self.port_arg = port_arg
+        self.rate_hz = float(rate_hz)
+        self.record = bool(record)
+        self.log = log
+        self.enabled = str(port_arg).lower() not in ("none", "off", "")
+        self.running = True
+        self.ser = None
+        self.parser = MavParser()
+        self.seq = 0
+        self.port = None
+        self.state = "searching" if self.enabled else "disabled"
+        self.sysid, self.compid = 1, 1
+        self.armed = False
+        self.autopilot = None
+        self.arr = [collections.deque(maxlen=600) for _ in IMU_STREAMS]
+        self.last_rx = 0.0
+        self.touched = []
+        self.lock = threading.Lock()
+        self.rec = None
+        self.rows = [0, 0, 0]
+        self.t_first = None
+        self.t_last = None
+        self.offset_ns = None
+        self.rtt_ns = None
+        self.denied = 0
+        self.rate_ladder = (100.0, 50.0, 40.0, 25.0)      # tried downwards when the Cube refuses a rate (loop rate too slow)
+        self.last_step = 0.0
+        self.outstanding = 0                              # rate requests sent that the Cube has not answered yet
+        self.stale_acks = 0
+        self.warned = set()
+        self.last_request = 0.0
+        self.last_sync = 0.0
+        self.last_flush = 0.0
+        self.sync_sent = collections.deque(maxlen=16)
+        self.offs = collections.deque(maxlen=15)      # recent TIMESYNC clock offsets (Cube minus Jetson), ns (diagnostics)
+        self.dwin = collections.deque(maxlen=1500)    # recent (Cube time - arrival time) of IMU1, ns
+        self.dfilt = None                             # smoothed lowest-latency estimate of that difference
+        self.last_t = [0, 0, 0]
+
+    # -------------------------------------------------------------------------------------------- connection
+    def _candidates(self):
+        if str(self.port_arg).lower() != "auto":
+            return [self.port_arg]
+        c = []
+        for pat in ("/dev/serial/by-id/*CubePilot*if00*", "/dev/serial/by-id/*Cube*if00*", "/dev/serial/by-id/*ArduPilot*if00*",
+                    "/dev/ttyACM*"):
+            for p in sorted(glob.glob(pat)):
+                if p not in c:
+                    c.append(p)
+        return c
+
+    def _warn_once(self, key, text):
+        if key not in self.warned:
+            self.warned.add(key)
+            self.log(text)
+
+    def _connect(self):
+        for dev in self._candidates():
+            try:
+                ser = SerialPort(dev)
+            except PermissionError:
+                self.state = "no permission"
+                self._warn_once("perm", "cannot open %s: permission denied - add this user to the 'dialout' group "
+                                        "(sudo usermod -aG dialout $USER, then log in again)" % dev)
+                continue
+            except OSError:
+                continue
+            parser = MavParser()
+            t0 = time.time()
+            found = None
+            try:
+                while time.time() - t0 < 3.0 and found is None:
+                    for msgid, sysid, compid, payload in parser.feed(ser.read(0.2)):
+                        if msgid == 0:
+                            hb = mav_decode(0, payload)
+                            if hb["autopilot"] != 8:           # 8 = MAV_AUTOPILOT_INVALID (peripherals)
+                                found = (sysid, compid, hb)
+                                break
+            except OSError:
+                found = None
+            if found is None:
+                ser.close()
+                continue
+            self.ser, self.parser, self.port = ser, parser, dev
+            self.sysid, self.compid = found[0], found[1]
+            self.armed = bool(found[2]["base_mode"] & 128)
+            self.autopilot = found[2]["autopilot"]
+            self.last_rx = time.time()
+            self.state = "connected"
+            self.warned.discard("perm")
+            self.log("IMU: connected to %s (system %d%s)" % (dev, self.sysid, ", ARMED" if self.armed else ""))
+            self._request_rates()
+            return True
+        if self.state != "no permission":
+            self.state = "searching"
+        return False
+
+    def _close(self):
+        if self.ser is not None:
+            self.ser.close()
+        self.ser = None
+        self.state = "searching"
+
+    # -------------------------------------------------------------------------------------------- sending
+    def _send(self, msgid, payload):
+        self.seq = (self.seq + 1) & 0xFF
+        self.ser.write(mav_pack2(msgid, payload, self.seq))
+
+    def _set_interval(self, msgid, hz):
+        interval = 0 if hz == 0 else int(round(1e6 / hz))
+        payload = struct.pack("<fffffffHBBB", float(msgid), float(interval), 0, 0, 0, 0, 0,
+                              MAV_CMD_SET_MESSAGE_INTERVAL, self.sysid, self.compid, 0)
+        self._send(76, payload)
+
+    def _request_rates(self):
+        if self.armed:
+            self._warn_once("armed", "IMU: vehicle is ARMED - not changing telemetry rates")
+            return
+        self.last_request = time.time()
+        self.stale_acks = self.outstanding            # replies still owed for earlier requests
+        for _, _, mid in IMU_STREAMS:
+            self._set_interval(mid, self.rate_hz)
+            if mid not in self.touched:
+                self.touched.append(mid)
+        self._set_interval(ATTITUDE_ID, 20.0)
+        if ATTITUDE_ID not in self.touched:
+            self.touched.append(ATTITUDE_ID)
+        self.outstanding += len(IMU_STREAMS) + 1
+
+    def _timesync(self):
+        ts1 = time.monotonic_ns()
+        self.sync_sent.append(ts1)
+        self._send(111, struct.pack("<qq", 0, ts1))
+
+    # -------------------------------------------------------------------------------------------- receiving
+    def _stamp(self, idx, fc_ns, arrival_ns):
+        """Sample time on this computer's CLOCK_MONOTONIC.
+
+        Every message obeys  arrival = Cube_send_time - clock_offset + latency  with latency >= 0. The messages with the
+        smallest latency therefore give the clock offset: D = max(Cube time - arrival) over a recent window (RAW_IMU, which has
+        microsecond stamps; the same D serves IMU2/3). Sample time = Cube time - D, so USB / main-loop batching jitter is
+        removed and a sample can never be placed after its arrival. (The TIMESYNC round trip is NOT used for this: the
+        Cube answers only on its next 50 Hz loop tick, so the round trip is asymmetric and the NTP-style midpoint is biased
+        by ~10 ms.) The constant minimum latency (~1 ms USB) stays inside D; VIO calibrates a remaining offset anyway.
+        Falls back to the arrival time until 20 samples exist, and when the two disagree by more than 0.3 s (Cube reboot)."""
+        if idx == 0:
+            self.dwin.append(fc_ns - arrival_ns)
+            if len(self.dwin) >= 20:
+                best = max(self.dwin)
+                self.dfilt = best if self.dfilt is None else self.dfilt + 0.05 * (best - self.dfilt)
+        t = arrival_ns
+        if self.dfilt is not None:
+            cand = fc_ns - int(self.dfilt)
+            if cand > arrival_ns:
+                cand = arrival_ns
+            if arrival_ns - cand < 300000000:
+                t = cand
+        if t <= self.last_t[idx]:
+            t = self.last_t[idx] + 1000
+        self.last_t[idx] = t
+        return t
+
+    def _handle(self, msgid, sysid, compid, payload, t_ns):
+        if msgid == 0:
+            hb = mav_decode(0, payload)
+            if hb["autopilot"] != 8 and sysid == self.sysid:
+                self.armed = bool(hb["base_mode"] & 128)
+        elif msgid in (27, 116, 129):
+            m = mav_decode(msgid, payload)
+            idx = 0 if msgid == 27 else (1 if msgid == 116 else 2)
+            self.arr[idx].append(t_ns * 1e-9)
+            fc_us = m["time_usec"] if msgid == 27 else m["time_boot_ms"] * 1000
+            arrival_ns = t_ns
+            t_ns = self._stamp(idx, fc_us * 1000, arrival_ns)
+            row = (m["xgyro"] * 1e-3, m["ygyro"] * 1e-3, m["zgyro"] * 1e-3,
+                   m["xacc"] * 1e-3 * G_MSS, m["yacc"] * 1e-3 * G_MSS, m["zacc"] * 1e-3 * G_MSS)
+            with self.lock:
+                rec = self.rec
+                if rec is not None and self.record:
+                    rec["imu"][idx].write("%d,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n" % ((t_ns,) + row))
+                    rec["fc"][idx].write("%d,%d,%d\n" % (t_ns, fc_us, arrival_ns))
+                    self.rows[idx] += 1
+                    if self.t_first is None:
+                        self.t_first = t_ns
+                    self.t_last = t_ns
+        elif msgid == ATTITUDE_ID:
+            m = mav_decode(msgid, payload)
+            with self.lock:
+                if self.rec is not None and self.record:
+                    self.rec["att"].write("%d,%d,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f\n" % (
+                        t_ns, m["time_boot_ms"], m["roll"], m["pitch"], m["yaw"], m["rollspeed"], m["pitchspeed"], m["yawspeed"]))
+        elif msgid == 77:
+            m = mav_decode(msgid, payload)
+            if m["command"] == MAV_CMD_SET_MESSAGE_INTERVAL:
+                # every request is answered; replies still owed for an EARLIER round (sent before the last step-down) must not
+                # trigger another step. The time limit keeps a lost reply from blocking real refusals for ever.
+                self.outstanding = max(0, self.outstanding - 1)
+                stale = self.stale_acks > 0 and time.time() - self.last_step < 1.0
+                if stale:
+                    self.stale_acks -= 1
+                if m["result"] != 0:
+                    self.denied += 1
+                    self._warn_once("denied%d" % m["result"], "IMU: Cube answered %s to a rate request (its main loop "
+                                    "may be too slow for %g Hz)" % (ACK_NAMES.get(m["result"], m["result"]), self.rate_hz))
+                    if not stale:                                    # refused in the current round: try the next lower rate
+                        lower = [r for r in self.rate_ladder if r < self.rate_hz]
+                        if lower:
+                            self.last_step = time.time()
+                            self.log("IMU: Cube refused %g Hz - asking for %g Hz instead" % (self.rate_hz, lower[0]))
+                            self.rate_hz = lower[0]
+                            self._request_rates()
+        elif msgid == 111:
+            m = mav_decode(msgid, payload)
+            if m["tc1"] != 0 and m["ts1"] in self.sync_sent:
+                rtt = t_ns - m["ts1"]
+                if 0 < rtt < 500000000:
+                    self.rtt_ns = rtt
+                    self.offset_ns = m["tc1"] - (m["ts1"] + t_ns) // 2          # Cube time minus this computer's time
+                    self.offs.append(self.offset_ns)
+                    with self.lock:
+                        if self.rec is not None and self.record:
+                            self.rec["sync"].write("%d,%d,%d,%d,%d\n" % (m["ts1"], t_ns, m["tc1"], rtt, self.offset_ns))
+
+    def run(self):
+        if not self.enabled:
+            return
+        while self.running:
+            if self.ser is None:
+                if not self._connect():
+                    time.sleep(2.0)
+                continue
+            try:
+                data = self.ser.read(0.05)
+                t_ns = time.monotonic_ns()
+                if data:
+                    self.last_rx = time.time()
+                    for msgid, sysid, compid, payload in self.parser.feed(data):
+                        self._handle(msgid, sysid, compid, payload, t_ns)
+                now = time.time()
+                if now - self.last_rx > 3.0:
+                    self.log("IMU: no data for 3 s - reconnecting")
+                    self._close()
+                    continue
+                if now - self.last_sync >= 1.0:
+                    self.last_sync = now
+                    self._timesync()
+                if now - self.last_request >= 20.0 and not self.armed:       # a rebooted Cube forgets the rates
+                    if self.snapshot()["hz"] < 0.7 * self.rate_hz:
+                        self._request_rates()
+                    else:
+                        self.last_request = now
+                if now - self.last_flush >= 1.0:
+                    self.last_flush = now
+                    with self.lock:
+                        if self.rec is not None:
+                            for grp in ("imu", "fc"):
+                                for f in self.rec[grp]:
+                                    f.flush()
+                            for k in ("att", "sync"):
+                                self.rec[k].flush()
+            except OSError as e:
+                self.log("IMU link lost: %s" % e)
+                self._close()
+                time.sleep(1.0)
+
+    # -------------------------------------------------------------------------------------------- recording
+    def is_connected(self):
+        return self.ser is not None and time.time() - self.last_rx < 3.0
+
+    def start_recording(self, root):
+        """Open the IMU files of a new dataset (called when a recording starts)."""
+        if not self.is_connected():
+            return False
+        base = os.path.join(root, "mav0")
+        rec = {"imu": [], "fc": []}
+        for k, (name, folder, _mid) in enumerate(IMU_STREAMS):
+            d = os.path.join(base, folder)
+            os.makedirs(d, exist_ok=True)
+            f = open(os.path.join(d, "data.csv"), "w")
+            f.write(EUROC_IMU_HEADER)
+            g = open(os.path.join(d, "data_fc.csv"), "w")
+            g.write("#timestamp [ns] (as in data.csv),cube_time_us,arrival_ns (raw, when the message was read)\n")
+            rec["imu"].append(f)
+            rec["fc"].append(g)
+            with open(os.path.join(d, "sensor.yaml"), "w") as y:
+                y.write("# ArduPilot %s over MAVLink (Cube Orange)\n" % name)
+                y.write("sensor_type: imu\nrate_hz: %g\n" % self.rate_hz)
+                y.write("comment: Cube IMU %d. Latest sample at the time the message was sent (not every raw sample), "
+                        "16-bit integers (1 mg, 1 mrad/s). Timestamp = the Cube's own sample time moved onto the Jetson CLOCK_MONOTONIC using the lowest-latency "
+                        "messages (raw arrival times and the Cube time are in data_fc.csv).\n" % (k + 1))
+                y.write("frame: FRD (x forward, y right, z down); accelerometer = specific force (about -9.81 on z at rest)\n")
+        cdir = os.path.join(base, "cube")
+        os.makedirs(cdir, exist_ok=True)
+        rec["att"] = open(os.path.join(cdir, "attitude.csv"), "w")
+        rec["att"].write("#timestamp [ns],cube_time_ms,roll_rad,pitch_rad,yaw_rad,rollspeed,pitchspeed,yawspeed\n")
+        rec["sync"] = open(os.path.join(cdir, "timesync.csv"), "w")
+        rec["sync"].write("#jetson_send_ns,jetson_recv_ns,cube_ns,rtt_ns,offset_cube_minus_jetson_ns\n")
+        with self.lock:
+            self.rows = [0, 0, 0]
+            self.t_first = self.t_last = None
+            self.rec = rec
+        return True
+
+    def stop_recording(self):
+        """Close the IMU files; returns a summary dict (or None if nothing was being written)."""
+        with self.lock:
+            rec, self.rec = self.rec, None
+            rows = list(self.rows)
+            t0, t1 = self.t_first, self.t_last
+        if rec is None:
+            return None
+        for grp in ("imu", "fc"):
+            for f in rec[grp]:
+                f.close()
+        rec["att"].close()
+        rec["sync"].close()
+        dur = (t1 - t0) / 1e9 if t0 is not None and t1 is not None and t1 > t0 else 0.0
+        return {"port": self.port, "rate_requested_hz": self.rate_hz, "rows": rows, "duration_s": round(dur, 3),
+                "measured_hz": round((rows[0] - 1) / dur, 2) if dur > 0 and rows[0] > 1 else 0.0,
+                "clock_offset_used_ms": None if self.dfilt is None else round(self.dfilt / 1e6, 3),
+                "clock_offset_timesync_ms": None if self.offset_ns is None else round(self.offset_ns / 1e6, 3),
+                "timesync_rtt_ms": None if self.rtt_ns is None else round(self.rtt_ns / 1e6, 3)}
+
+    # -------------------------------------------------------------------------------------------- reporting
+    def snapshot(self):
+        now = time.monotonic()
+        a = [t for t in list(self.arr[0]) if now - t <= 2.0]
+        hz, gap = 0.0, 0.0
+        if len(a) >= 3 and now - a[-1] < 1.0:
+            hz = (len(a) - 1) / (a[-1] - a[0])
+            gap = max(b - c for b, c in zip(a[1:], a[:-1])) * 1000.0
+        connected = self.is_connected()
+        return {"enabled": self.enabled, "state": self.state if not connected else "connected", "port": self.port,
+                "armed": self.armed, "hz": round(hz, 1), "gap_ms": round(gap), "rows": self.rows[0], "record": self.record,
+                "requested_hz": self.rate_hz, "denied": self.denied,
+                "offset_ms": None if self.offset_ns is None else round(self.offset_ns / 1e6, 1),
+                "rtt_ms": None if self.rtt_ns is None else round(self.rtt_ns / 1e6, 1)}
+
+    def shutdown(self):
+        """Leave the Cube as we found it: ask for the default rates back, then close."""
+        self.running = False
+        try:
+            if self.ser is not None and self.touched and not self.armed:
+                for mid in self.touched:
+                    self._set_interval(mid, 0)
+                time.sleep(0.4)
+        except OSError:
+            pass
+        self.stop_recording()
+        self._close()
+
+
 # ----------------------------------------------------------------------------
 # Application
 # ----------------------------------------------------------------------------
@@ -609,6 +1174,7 @@ class App(object):
         else:
             self.pairer = Feeder(self.cams[0], self.on_pair)
         self.previews = [Preview(c, args, self) for c in self.cams]
+        self.imu = ImuRecorder(args.imu_port, args.imu_rate, args.imu_record, log=lambda t: print("\n[imu] " + t))
         self.running = True
         self.rec_started = 0.0
         self.disk_free_gb = 0.0
@@ -641,6 +1207,11 @@ class App(object):
                 return
             root = next_dataset_dir(self.args.out, self.args.name)
             self.writer = DatasetWriter(root, self.args, self.cams)
+            if self.imu.record:
+                if self.imu.start_recording(root):
+                    self.writer.imu_info = {"recording": True, "port": self.imu.port, "layout": "mav0/imu0 (Cube IMU1), imu1, imu2, cube/"}
+                else:
+                    print("\n[imu] Cube not connected - recording WITHOUT the IMU (state: %s)" % self.imu.snapshot()["state"])
             self.rec_started = time.time()
             print("\n>>> RECORDING -> %s" % root)
 
@@ -649,6 +1220,9 @@ class App(object):
             w, self.writer = self.writer, None
         if w is None:
             return
+        info = self.imu.stop_recording()
+        if info is not None:
+            w.imu_info = info
         n = w.finish()
         self.last_dataset = w.root
         mb = w.bytes / 1e6
@@ -765,7 +1339,7 @@ class App(object):
         w = self.writer
         return {"recording": w is not None, "pairs": w.written if w else 0, "api": API_VERSION,
                 "cameras": len(self.cams), "mode": "mono" if len(self.cams) == 1 else "stereo",
-                "record_fps": self.args.record_fps,
+                "record_fps": self.args.record_fps, "imu": self.imu.snapshot(),
                 "preview": [self.previews[0].pw, self.previews[0].ph, self.args.preview_fps],
                 "dataset": w.root if w else None,
                 "elapsed_s": int(time.time() - self.rec_started) if w else 0,
@@ -816,6 +1390,11 @@ class App(object):
                 v = max(1.0, min(float(self.args.fps), float(parts[1])))
                 self.args.record_fps = v
                 self.say("remote: saving %.0f frames/s" % v)
+            elif cmd == "imurec" and len(parts) == 2:
+                if self.writer is not None:
+                    return dict(self.status(), error="stop recording before changing the IMU setting")
+                self.imu.record = parts[1] not in ("0", "off", "false")
+                self.say("remote: IMU recording %s" % ("on" if self.imu.record else "off"))
             elif cmd == "swap":
                 if len(self.cams) < 2:
                     return dict(self.status(), error="swap needs the two-camera mode")
@@ -881,6 +1460,7 @@ class App(object):
         a = self.args
         for c in self.cams:
             c.start()
+        self.imu.start()
         self.pairer.start()
         for p in self.previews:
             p.start()
@@ -910,6 +1490,7 @@ class App(object):
         self.running = False
         print("\nshutting down ...")
         self.stop_recording()
+        self.imu.shutdown()
         self.pairer.running = False
         for p in self.previews:
             p.stop()
@@ -981,6 +1562,14 @@ def parse_args(argv=None):
                    help="draw the focus meter / record state into the preview (default: clean picture)")
     p.add_argument("--role0", default="boresight 6mm", help="label for cam0 (default %(default)s)")
     p.add_argument("--role1", default="depression 8mm", help="label for cam1 (default %(default)s)")
+    p.add_argument("--imu-port", default="auto",
+                   help="Cube Orange serial port for the IMU: auto (default), a device like /dev/ttyACM0, or none")
+    p.add_argument("--imu-rate", type=float, default=100.0,
+                   help="IMU message rate to ask the Cube for, Hz. The Cube accepts up to about half its main loop rate "
+                        "(SCHED_LOOP_RATE 200 -> 100 Hz, 50 -> 40 Hz); if it refuses, the request steps down 100/50/40/25 "
+                        "(default %(default)s)")
+    p.add_argument("--no-imu-record", dest="imu_record", action="store_false",
+                   help="read the IMU (status only) but do not write it into recordings")
     p.add_argument("--note", default="", help="free text stored in meta.json")
     p.add_argument("--sim", action="store_true", help="synthetic cameras, for testing without hardware")
     p.add_argument("--check", action="store_true", help="print the environment and camera status, then exit")
