@@ -1,0 +1,60 @@
+%YAML:1.0
+
+# mono, boresight camera, green_mount (6mmboresight.json)
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: 1310.090571
+Camera1.fy: 1310.282642
+Camera1.cx: 651.892356
+Camera1.cy: 399.115015
+
+Camera1.k1: -0.52901355
+Camera1.k2: 0.24949160
+Camera1.p1: -0.00294280
+Camera1.p2: -0.00663696
+Camera1.k3: -0.01235181
+
+Camera.width: 1280
+Camera.height: 720
+
+Camera.fps: 30
+
+# gray images
+Camera.RGB: 1
+
+ORBextractor.nFeatures: 3000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 8
+ORBextractor.minThFAST: 3
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+
+# ---- IMU (added by make_inertial_settings.py from camimu_boresight_cube.yaml and imu_cube_100hz.yaml) ----
+# camera pose in the IMU frame (Kalibr T_imu_cam; ArduPilot FRD IMU)
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.020936785, -0.004995392, 0.999768322, 0.125786933,
+          0.999678725, -0.014184623, -0.021005783, 0.030561898,
+          0.014286269, 0.999886915, 0.004696807, 0.049643003,
+          0.000000000, 0.000000000, 0.000000000, 1.000000000]
+IMU.NoiseGyro: 1.00000000e-03
+IMU.NoiseAcc: 1.00000000e-02
+IMU.GyroWalk: 1.00000000e-05
+IMU.AccWalk: 2.00000000e-04
+IMU.Frequency: 100.0
+IMU.InsertKFsWhenLost: 0

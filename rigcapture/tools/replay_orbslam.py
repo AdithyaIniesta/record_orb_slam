@@ -43,6 +43,9 @@ def main():
     ap.add_argument("dataset")
     ap.add_argument("trajectory")
     ap.add_argument("--kf")
+    ap.add_argument("--inertial", metavar="CAMIMU.yaml",
+                    help="the trajectory is from monocular-INERTIAL ORB-SLAM3 (IMU body poses in a gravity-aligned world, metres): "
+                         "give the Kalibr camera-IMU result (T_imu_cam) to draw the camera, z up; f_ and kf_ files are put in one frame")
     ap.add_argument("--out", default="replay.mp4")
     ap.add_argument("--step", type=int, default=2, help="use every Nth frame (2 = 30 fps video from a 60 fps recording)")
     ap.add_argument("--fps", type=float, default=30.0)
@@ -54,12 +57,35 @@ def main():
     tr = tr.reshape(-1, 8)
     tt = np.round(tr[:, 0]).astype(np.int64) if tr[0, 0] > 1e11 else np.round(tr[:, 0] * 1e9).astype(np.int64)
     P = tr[:, 1:4]
-    # ORB-SLAM3 EuRoC output: x right / y down / z forward camera axes; plot with z up-ish: show map x, z, -y
-    def to_plot(p):
-        return np.array([p[0], p[2], -p[1]])
-    Pp = np.array([to_plot(p) for p in P])
     kf = np.loadtxt(a.kf).reshape(-1, 8) if a.kf and os.path.exists(a.kf) else np.zeros((0, 8))
-    Kp = np.array([to_plot(p) for p in kf[:, 1:4]]) if len(kf) else np.zeros((0, 3))
+    Rall = np.array([quat_to_rot(q) for q in tr[:, 4:8]])
+    Rkf = np.array([quat_to_rot(q) for q in kf[:, 4:8]]) if len(kf) else np.zeros((0, 3, 3))
+    Pkf = kf[:, 1:4] if len(kf) else np.zeros((0, 3))
+    if a.inertial:
+        import yaml
+        Tbc = np.array(yaml.safe_load(open(a.inertial))["T_imu_cam"], dtype=float)
+        # ORB-SLAM3 writes the frame file (f_) relative to the first keyframe's IMU pose and the keyframe file (kf_) in the map frame:
+        # same trajectory, two frames. Put f_ into the kf_ frame with a rigid fit on the shared time stamps.
+        if len(kf):
+            fi = {int(round(t)): i for i, t in enumerate(tr[:, 0])}
+            pr = [(fi[int(round(t))], j) for j, t in enumerate(kf[:, 0]) if int(round(t)) in fi]
+            if len(pr) >= 3:
+                A = np.array([P[i] for i, _ in pr]); B = np.array([Pkf[j] for _, j in pr])
+                ca, cb = A.mean(0), B.mean(0)
+                U, S, Vt = np.linalg.svd((A - ca).T @ (B - cb)); Rf = Vt.T @ U.T
+                if np.linalg.det(Rf) < 0:
+                    Vt[-1] *= -1; Rf = Vt.T @ U.T
+                P = (Rf @ (P - ca).T).T + cb
+                Rall = np.array([Rf @ r for r in Rall])
+                print("f_ put into the kf_ frame: residual %.3f m" % np.linalg.norm((Rf @ (A - ca).T).T + cb - B, axis=1).mean())
+        # IMU body pose -> camera pose: Twc = Twb * Tbc
+        P = np.array([r @ Tbc[:3, 3] + p for r, p in zip(Rall, P)]); Rall = np.array([r @ Tbc[:3, :3] for r in Rall])
+        Pkf = np.array([r @ Tbc[:3, 3] + p for r, p in zip(Rkf, Pkf)]) if len(kf) else Pkf
+    # monocular (no IMU): camera axes x right / y down / z forward, plot x, z, -y.  inertial: gravity-aligned world, z up, plot x, y, z.
+    def to_plot(p):
+        return np.array(p, dtype=float) if a.inertial else np.array([p[0], p[2], -p[1]])
+    Pp = np.array([to_plot(p) for p in P])
+    Kp = np.array([to_plot(p) for p in Pkf]) if len(kf) else np.zeros((0, 3))
 
     lo, hi = Pp.min(0), Pp.max(0)
     c = (lo + hi) / 2
@@ -103,8 +129,12 @@ def main():
         ax3.set_ylim(c[1] - half, c[1] + half)
         ax3.set_zlim(c[2] - half, c[2] + half)
         ax3.set_box_aspect((1, 1, 1))
-        ax3.set_xlabel("x"); ax3.set_ylabel("z (forward)"); ax3.set_zlabel("-y (up)")
-        ax3.set_title("ORB-SLAM3 camera path (map units, scale arbitrary)", fontsize=10)
+        if a.inertial:
+            ax3.set_xlabel("x [m]"); ax3.set_ylabel("y [m]"); ax3.set_zlabel("z up [m]")
+            ax3.set_title("ORB-SLAM3 monocular-inertial camera path (metres)", fontsize=10)
+        else:
+            ax3.set_xlabel("x"); ax3.set_ylabel("z (forward)"); ax3.set_zlabel("-y (up)")
+            ax3.set_title("ORB-SLAM3 camera path (map units, scale arbitrary)", fontsize=10)
         ax3.plot(Pp[:, 0], Pp[:, 1], Pp[:, 2], color="#bbbbbb", lw=0.8)
         if len(Kp):
             shown = Kp[kf[:, 0] <= tt[k]] if k >= 0 else Kp[:0]
@@ -112,7 +142,7 @@ def main():
                 ax3.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=14, c="#1f77b4", depthshade=False)
         if k >= 0:
             ax3.plot(Pp[:k + 1, 0], Pp[:k + 1, 1], Pp[:k + 1, 2], color="#d62728", lw=1.8)
-            R = quat_to_rot(tr[k, 4:8])
+            R = Rall[k]
             p = P[k]
             cs = frustum(p, R, cam_size)
             cs = np.array([to_plot(q) for q in cs])
