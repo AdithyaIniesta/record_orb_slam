@@ -29,6 +29,9 @@ Print `kalibr_noros/inputs/aprilgrid_kalibr_6x4_50mm_A3.pdf` at 100 %, fix it fl
 `tagSize`. Record 60 s moving only the rig. Result: `kalibr_noros/results/<recording>_<cam>/` (`T_cam_imu`, time shift).
 Details and what to trust: `docs/kalibr_noros.md`.
 
+On the Jetson (JetPack 5, uses the CUDA OpenCV in `/opt/opencv-4.10.0-cuda`): `./kalibr_noros/setup_kalibr_jetson.sh` (no root; it prints
+the one `sudo apt install` line it needs), then the same `calibrate_imu_camera.sh`. Not yet tested on a device.
+
 ## 3. ORB-SLAM3 (WSL / Ubuntu 22.04)
 ```bash
 sudo ./orbslam3/build_orbslam3.sh                               # once, clones upstream, 20-40 min
