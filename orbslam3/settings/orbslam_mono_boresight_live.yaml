@@ -1,0 +1,47 @@
+%YAML:1.0
+
+# mono, boresight camera, REAL-TIME setting for the Jetson: 640x360 processing size, 1500 features (see docs/orbslam3_jetson.md)
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: 1310.090571
+Camera1.fy: 1310.282642
+Camera1.cx: 651.892356
+Camera1.cy: 399.115015
+
+Camera1.k1: -0.52901355
+Camera1.k2: 0.24949160
+Camera1.p1: -0.00294280
+Camera1.p2: -0.00663696
+Camera1.k3: -0.01235181
+
+Camera.width: 1280
+Camera.height: 720
+
+Camera.fps: 30
+
+# gray images
+Camera.RGB: 1
+
+ORBextractor.nFeatures: 1500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 8
+ORBextractor.minThFAST: 3
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+
+# processing size: the program resizes with System::GetImageScale(); the intrinsics above stay those of the 1280x720 image
+Camera.newWidth: 640
+Camera.newHeight: 360

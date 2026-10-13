@@ -37,6 +37,7 @@ import argparse
 import collections
 import glob
 import json
+import mmap
 import os
 import select
 import shutil
@@ -65,7 +66,46 @@ except Exception as e:  # pragma: no cover
 Gst.init(None)
 
 NS = 1000000000
-API_VERSION = 5      # bumped when the status/command interface changes; the PC app upgrades older ones
+API_VERSION = 6      # bumped when the status/command interface changes; the PC app upgrades older ones
+
+# ORB-SLAM3 settings for the live program (boresight 6 mm camera, 640x360 processing size, 1500 features). Written to
+# ~/orbslam/settings/ when missing, so a freshly built Jetson needs nothing else. Same content as orbslam3/settings/orbslam_mono_boresight_live.yaml.
+SLAM_SETTINGS = """%YAML:1.0
+
+# mono, boresight camera, REAL-TIME setting for the Jetson: 640x360 processing size, 1500 features
+File.version: "1.0"
+Camera.type: "PinHole"
+Camera1.fx: 1310.090571
+Camera1.fy: 1310.282642
+Camera1.cx: 651.892356
+Camera1.cy: 399.115015
+Camera1.k1: -0.52901355
+Camera1.k2: 0.24949160
+Camera1.p1: -0.00294280
+Camera1.p2: -0.00663696
+Camera1.k3: -0.01235181
+Camera.width: 1280
+Camera.height: 720
+Camera.fps: 30
+Camera.RGB: 1
+ORBextractor.nFeatures: 1500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 8
+ORBextractor.minThFAST: 3
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+Camera.newWidth: 640
+Camera.newHeight: 360
+"""
 
 
 # ----------------------------------------------------------------------------
@@ -317,6 +357,123 @@ class Feeder(threading.Thread):
 
     def skew_stats_ms(self):
         return 0.0, 0.0
+
+
+# ----------------------------------------------------------------------------
+# Live feed for a SLAM program on the same machine (orbslam3/apps/mono_live)
+# ----------------------------------------------------------------------------
+class SlamFeed(threading.Thread):
+    """Publishes the NEWEST gray frame of one camera into a shared-memory file, at most --slam-feed-fps per second.
+
+    File layout (little endian), read it with a seqlock (read seq, copy, read seq again; odd seq = being written):
+        0   u64  magic "RIGSLAM1"
+        8   u64  seq        (2k+1 while frame k is written, 2k+2 when complete)
+        16  i64  t_ns       frame time, CLOCK_MONOTONIC ns (same clock as the recorded datasets)
+        24  u32  frame_id   camera frame counter (gaps = camera frames not published)
+        28  u32  width      32 u32 height      36 u32 stride (= width)      40 u32 pub_id (published-frame counter)
+        64  ...  pixels, height * stride bytes, 8-bit gray
+    The camera callback is not touched: this thread only looks at cam.latest, so recording is unaffected."""
+    HEADER = 64
+    MAGIC = struct.unpack("<Q", b"RIGSLAM1")[0]
+
+    def __init__(self, cam, path, fps, width, height):
+        threading.Thread.__init__(self, name="slamfeed", daemon=True)
+        self.cam, self.path, self.min_dt_ns = cam, path, int(1e9 / max(fps, 1.0) * 0.9)
+        self.w, self.h = int(width), int(height)
+        self.running = True
+        self.published = 0
+        self.mm = None
+
+    def run(self):
+        size = self.HEADER + self.w * self.h
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            os.ftruncate(fd, size)
+            self.mm = mmap.mmap(fd, size)
+        finally:
+            os.close(fd)
+        struct.pack_into("<QQqIIII", self.mm, 0, self.MAGIC, 0, 0, 0, self.w, self.h, self.w)
+        pix = np.frombuffer(self.mm, np.uint8, count=self.w * self.h, offset=self.HEADER).reshape(self.h, self.w)
+        last_id, last_t, k = 0, 0, 0
+        while self.running:
+            f = self.cam.latest
+            if f is None or f.seq == last_id or f.t_ns - last_t < self.min_dt_ns or f.y.shape != (self.h, self.w):
+                time.sleep(0.002)
+                continue
+            k += 1
+            struct.pack_into("<Q", self.mm, 8, 2 * k - 1)                 # odd: writing
+            np.copyto(pix, f.y)
+            struct.pack_into("<qI", self.mm, 16, f.t_ns, f.seq & 0xFFFFFFFF)
+            struct.pack_into("<I", self.mm, 40, k & 0xFFFFFFFF)           # published-frame counter (readers count real drops with it)
+            struct.pack_into("<Q", self.mm, 8, 2 * k)                     # even: complete
+            last_id, last_t = f.seq, f.t_ns
+            self.published += 1
+
+    def stop(self):
+        self.running = False
+        self.join(timeout=2.0)
+        try:
+            if self.mm is not None:
+                del self.mm
+            os.unlink(self.path)
+        except Exception:
+            pass
+
+
+class SlamRelay(threading.Thread):
+    """Receives the UDP messages of mono_live on localhost and keeps the recent poses for the PC app, which polls them over
+    the control channel (a request from the PC always gets its reply through the PC's firewall; an incoming stream would not).
+        P t_ns x y z qx qy qz qw   camera pose in the map (state OK)       S state fps mean_ms skipped   once per second
+        N                           a new map started (the old one was lost)"""
+
+    def __init__(self, port):
+        threading.Thread.__init__(self, name="slamrelay", daemon=True)
+        self.port = port
+        self.lock = threading.Lock()
+        self.running = True
+        self.reset()
+
+    def reset(self):
+        with self.lock:
+            self.poses = collections.deque(maxlen=60000)
+            self.total, self.map_id = 0, 0
+            self.state, self.fps, self.ms, self.skipped, self.last_msg = 0, 0.0, 0.0, 0, 0.0
+
+    def run(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", self.port))
+        sock.settimeout(0.5)
+        while self.running:
+            try:
+                data = sock.recv(512).decode("ascii", "ignore").split()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                with self.lock:
+                    self.last_msg = time.time()
+                    if data[0] == "P" and len(data) == 9:
+                        self.total += 1
+                        self.poses.append((self.total,) + tuple(round(float(v), 5) for v in data[2:9]) + (self.map_id,))
+                    elif data[0] == "S" and len(data) == 5:
+                        self.state, self.fps, self.ms, self.skipped = int(data[1]), float(data[2]), float(data[3]), int(data[4])
+                    elif data[0] == "N":
+                        self.map_id += 1
+            except ValueError:
+                pass
+        sock.close()
+
+    def poll(self, since, limit=100):
+        """Everything the app has not seen yet (oldest first, at most `limit` poses per reply)."""
+        with self.lock:
+            first = self.poses[0][0] if self.poses else 0
+            start = max(0, since + 1 - first)
+            items = list(self.poses)[start:start + limit] if self.poses else []
+            return {"state": self.state, "fps": self.fps, "ms": self.ms, "skipped": self.skipped, "total": self.total,
+                    "maps": self.map_id + 1, "age_s": round(time.time() - self.last_msg, 1) if self.last_msg else None,
+                    "poses": [list(p) for p in items]}
 
 
 # ----------------------------------------------------------------------------
@@ -1174,6 +1331,12 @@ class App(object):
         else:
             self.pairer = Feeder(self.cams[0], self.on_pair)
         self.previews = [Preview(c, args, self) for c in self.cams]
+        self.slam_feed = None
+        self.slam_relay = None
+        self.slam_proc = None
+        if args.slam_feed:
+            self.slam_feed = SlamFeed(self.cams[min(args.slam_cam, len(self.cams) - 1)], args.slam_feed, args.slam_feed_fps,
+                                      args.width, args.height)
         self.imu = ImuRecorder(args.imu_port, args.imu_rate, args.imu_record, log=lambda t: print("\n[imu] " + t))
         self.running = True
         self.rec_started = 0.0
@@ -1335,9 +1498,68 @@ class App(object):
         finally:
             self.swapping = False
 
+    # -- live SLAM (ORB-SLAM3 monocular, mono_live) ---------------------------------------------------------------
+    def slam_paths(self):
+        orb = os.path.expanduser(self.args.orb_home)
+        return (orb, os.path.join(orb, "apps", "mono_live"), os.path.join(orb, "orbslam3", "Vocabulary", "ORBvoc.txt"),
+                os.path.join(orb, "settings", "orbslam_mono_boresight_live.yaml"))
+
+    def slam_running(self):
+        return self.slam_proc is not None and self.slam_proc.poll() is None
+
+    def slam_start(self):
+        """Start mono_live on the newest frames of the boresight camera. Returns an error text, or None when it runs."""
+        if self.slam_running():
+            return None
+        orb, exe, voc, settings = self.slam_paths()
+        for p in (exe, voc):
+            if not os.path.exists(p):
+                return "ORB-SLAM3 is not installed on this Jetson (%s missing): run orbslam3/build_orbslam3_jetson.sh" % p
+        os.makedirs(os.path.dirname(settings), exist_ok=True)
+        try:
+            same = open(settings).read() == SLAM_SETTINGS
+        except OSError:
+            same = False
+        if not same:
+            with open(settings, "w") as fh:
+                fh.write(SLAM_SETTINGS)
+        feed = self.args.slam_feed or "/dev/shm/rig_slam_cam0"
+        if self.slam_feed is None:
+            self.slam_feed = SlamFeed(self.cams[min(self.args.slam_cam, len(self.cams) - 1)], feed, self.args.slam_feed_fps,
+                                      self.args.width, self.args.height)
+            self.slam_feed.start()
+        if self.slam_relay is None:
+            self.slam_relay = SlamRelay(self.args.slam_port)
+            self.slam_relay.start()
+        self.slam_relay.reset()
+        out = os.path.join(orb, "live_out")
+        logs = os.path.join(orb, "logs")
+        os.makedirs(out, exist_ok=True)
+        os.makedirs(logs, exist_ok=True)
+        n = len(glob.glob(os.path.join(out, "f_app_*.txt"))) + 1
+        log = open(os.path.join(logs, "mono_live_app.log"), "ab")
+        self.slam_proc = subprocess.Popen([exe, voc, settings, "--shm", feed, "--udp", "127.0.0.1:%d" % self.args.slam_port,
+                                           "--name", "app_%d" % n], cwd=out, stdout=log, stderr=log)
+        return None
+
+    def slam_stop(self):
+        p, self.slam_proc = self.slam_proc, None
+        if p is not None and p.poll() is None:
+            p.send_signal(signal.SIGINT)                       # mono_live saves its trajectory and exits
+            try:
+                p.wait(10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        if self.slam_feed is not None and not self.args.slam_feed:
+            self.slam_feed.stop()
+            self.slam_feed = None
+
     def status(self):
         w = self.writer
-        return {"recording": w is not None, "pairs": w.written if w else 0, "api": API_VERSION,
+        rel = self.slam_relay
+        slam = {"running": self.slam_running(), "installed": os.path.exists(self.slam_paths()[1]),
+                "state": rel.state if rel else 0, "fps": round(rel.fps, 1) if rel else 0.0, "ms": round(rel.ms, 1) if rel else 0.0}
+        return {"recording": w is not None, "pairs": w.written if w else 0, "api": API_VERSION, "slam": slam,
                 "cameras": len(self.cams), "mode": "mono" if len(self.cams) == 1 else "stereo",
                 "record_fps": self.args.record_fps, "imu": self.imu.snapshot(),
                 "preview": [self.previews[0].pw, self.previews[0].ph, self.args.preview_fps],
@@ -1395,6 +1617,22 @@ class App(object):
                     return dict(self.status(), error="stop recording before changing the IMU setting")
                 self.imu.record = parts[1] not in ("0", "off", "false")
                 self.say("remote: IMU recording %s" % ("on" if self.imu.record else "off"))
+            elif cmd == "slam" and len(parts) >= 2:
+                sub = parts[1].lower()
+                if sub == "on":
+                    err = self.slam_start()
+                    if err:
+                        return dict(self.status(), error=err)
+                    self.say("remote: live SLAM started")
+                elif sub == "off":
+                    self.slam_stop()
+                    self.say("remote: live SLAM stopped")
+                elif sub == "poll":
+                    since = int(parts[2]) if len(parts) > 2 else 0
+                    rel = self.slam_relay
+                    return dict(self.status(), slam_poll=rel.poll(since) if rel else None)
+                else:
+                    return dict(self.status(), error="unknown slam command: %s" % line)
             elif cmd == "swap":
                 if len(self.cams) < 2:
                     return dict(self.status(), error="swap needs the two-camera mode")
@@ -1464,6 +1702,9 @@ class App(object):
         self.pairer.start()
         for p in self.previews:
             p.start()
+        if self.slam_feed is not None:
+            self.slam_feed.start()
+            print("SLAM feed: newest cam%d frame -> %s at up to %g fps" % (self.slam_feed.cam.index, a.slam_feed, a.slam_feed_fps))
         threading.Thread(target=self.watchdog, name="watchdog", daemon=True).start()
         if a.control_port:
             threading.Thread(target=self.control_server, name="control", daemon=True).start()
@@ -1490,8 +1731,13 @@ class App(object):
         self.running = False
         print("\nshutting down ...")
         self.stop_recording()
+        self.slam_stop()
+        if self.slam_relay is not None:
+            self.slam_relay.running = False
         self.imu.shutdown()
         self.pairer.running = False
+        if self.slam_feed is not None:
+            self.slam_feed.stop()
         for p in self.previews:
             p.stop()
         for c in self.cams:
@@ -1570,6 +1816,13 @@ def parse_args(argv=None):
                         "(default %(default)s)")
     p.add_argument("--no-imu-record", dest="imu_record", action="store_false",
                    help="read the IMU (status only) but do not write it into recordings")
+    p.add_argument("--slam-feed", default=None, metavar="PATH",
+                   help="publish the newest gray frame of one camera into this shared-memory file for a live SLAM program, "
+                        "e.g. /dev/shm/rig_slam_cam0 (default: off; recording is not affected)")
+    p.add_argument("--slam-feed-fps", type=float, default=30.0, help="at most this many frames per second into the feed (default %(default)s)")
+    p.add_argument("--slam-cam", type=int, choices=(0, 1), default=0, help="camera for the SLAM feed (default %(default)s)")
+    p.add_argument("--slam-port", type=int, default=5011, help="localhost UDP port mono_live reports to (default %(default)s)")
+    p.add_argument("--orb-home", default="~/orbslam", help="where build_orbslam3_jetson.sh installed ORB-SLAM3 (default %(default)s)")
     p.add_argument("--note", default="", help="free text stored in meta.json")
     p.add_argument("--sim", action="store_true", help="synthetic cameras, for testing without hardware")
     p.add_argument("--check", action="store_true", help="print the environment and camera status, then exit")

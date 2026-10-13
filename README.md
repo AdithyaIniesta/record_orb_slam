@@ -37,7 +37,17 @@ python3 rigcapture/tools/replay_orbslam.py RECORDING_DIR RECORDING_DIR/orbslam_*
 ```
 `run_mono.sh` prints how many frames got a pose. Monocular without IMU: arbitrary scale, needs sideways motion.
 
+### Live SLAM on the Jetson (JetPack 5)
+```bash
+sudo apt install -y libssl-dev libboost-serialization-dev libglew-dev libepoxy-dev     # once, the only sudo step
+./orbslam3/build_orbslam3_jetson.sh                                                    # once, no root, 20-40 min, installs in ~/orbslam
+```
+Then press **START LIVE SLAM** in RigCapture: a 3D window shows the camera path. Move the rig slowly **sideways** until it says
+TRACKING. (No GUI: `./orbslam3/run_live.sh`.) Real-time settings: 640x360, 1500 features, about 27-30 fps on an Orin NX.
+Problems met and their fixes: `docs/orbslam3_jetson.md`.
+
 ## Status
-- Verified: RigCapture (Windows 11, exe builds, IMU 100 Hz), Kalibr camera-IMU on real recordings, ORB-SLAM3 mono in WSL (95 % tracked on a test run).
-- Not done yet: ORB-SLAM3 on the Jetson, visual-inertial runs, exact lever arm (measure with calipers).
-- More: `docs/rigcapture_notes.md` (IMU format, limits), `docs/kalibr_noros.md`.
+- Verified: RigCapture (Windows 11, exe builds from scratch, IMU 100 Hz, live SLAM button + 3D view), Kalibr camera-IMU on real recordings,
+  ORB-SLAM3 in WSL and live on a Jetson Orin NX (JetPack 5.1.5).
+- Not done yet: visual-inertial runs (Cube IMU into ORB-SLAM3), exact lever arm (measure with calipers), install on a second Jetson.
+- More: `docs/rigcapture_notes.md` (IMU format, limits), `docs/kalibr_noros.md`, `docs/orbslam3_jetson.md`.

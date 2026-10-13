@@ -17,6 +17,7 @@ Control: UDP 5010 to stereo_capture.py on the Jetson.  Setup / copy: the Windows
 """
 import argparse
 import json
+import math
 import os
 import posixpath
 import queue
@@ -35,8 +36,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 APP_NAME = "Rig Capture"
-APP_VERSION = "1.0"
-REQUIRED_API = 5        # capture-program interface this app needs (stereo_capture.py API_VERSION)
+APP_VERSION = "1.1"
+REQUIRED_API = 6        # capture-program interface this app needs (stereo_capture.py API_VERSION)
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # ==========================================================================
@@ -306,6 +307,202 @@ def local_ip_towards(ip):
         s.close()
 
 
+# ==========================================================================
+# Live SLAM: polls the Jetson for poses and shows them in a small 3D viewer (plain tkinter, no extra packages)
+# ==========================================================================
+SLAM_STATES = {0: ("waiting for images", "#9aa0a6"), 1: ("initialising - move the rig slowly SIDEWAYS", "#f4c542"),
+               2: ("TRACKING", "#3ec16a"), 3: ("recently lost", "#f59e42"), 4: ("LOST", "#ff6b6b"), 5: ("TRACKING", "#3ec16a")}
+SLAM_MAP_COLORS = ["#4cc9f0", "#f72585", "#b8f34a", "#ffb703", "#c77dff", "#ff7b54"]
+
+
+def quat_axes(qx, qy, qz, qw):
+    """Columns of the rotation matrix of a quaternion = the camera's x (right), y (down), z (forward) axes in the map."""
+    return ((1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + qz * qw), 2 * (qx * qz - qy * qw)),
+            (2 * (qx * qy - qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz + qx * qw)),
+            (2 * (qx * qz + qy * qw), 2 * (qy * qz - qx * qw), 1 - 2 * (qx * qx + qy * qy)))
+
+
+class Slam3D:
+    """Polls `slam poll` on the control channel and draws the camera path (monocular: the scale is arbitrary).
+    Map frame of ORB-SLAM3: x right, y down, z forward (of the first camera pose); shown as X right, Y forward, Z up."""
+
+    def __init__(self, app):
+        self.app = app
+        self.lock = threading.Lock()
+        self.win = None
+        self.canvas = None
+        self.polling = False
+        self.yaw, self.pitch, self.zoom = 0.7, 0.55, 1.0
+        self._drag = None
+        self.reset_data()
+
+    # -- data -----------------------------------------------------------------------------------------------------
+    def reset_data(self):
+        with self.lock:
+            self.maps = [[]]
+            self.cur = None
+            self.last = 0
+            self.state, self.fps, self.ms, self.skipped, self.total, self.nmaps = 0, 0.0, 0.0, 0, 0, 1
+
+    def snapshot(self):
+        with self.lock:
+            return {"state": self.state, "fps": self.fps, "ms": self.ms, "skipped": self.skipped, "total": self.total,
+                    "maps": self.nmaps, "poses": sum(len(m) for m in self.maps)}
+
+    def _ingest(self, p):
+        with self.lock:
+            if p.get("total", 0) < self.last:                       # the Jetson restarted SLAM: start over
+                self.maps, self.cur, self.last = [[]], None, 0
+            self.state, self.fps, self.ms = p.get("state", 0), p.get("fps", 0.0), p.get("ms", 0.0)
+            self.skipped, self.total, self.nmaps = p.get("skipped", 0), p.get("total", 0), p.get("maps", 1)
+            for q in p.get("poses", []):
+                i, x, y, z, qx, qy, qz, qw, m = q
+                while len(self.maps) <= m:
+                    self.maps.append([])
+                self.maps[m].append((x, z, -y))
+                ax = quat_axes(qx, qy, qz, qw)
+                conv = lambda v: (v[0], v[2], -v[1])
+                self.cur = (x, z, -y, conv(ax[0]), conv(ax[1]), conv(ax[2]))
+                self.last = i
+
+    def start(self):
+        self.reset_data()
+        if self.polling:
+            return
+        self.polling = True
+        threading.Thread(target=self._poll_loop, name="slampoll", daemon=True).start()
+
+    def stop(self):
+        self.polling = False
+
+    def _poll_loop(self):
+        while self.polling:
+            r = udp_send(self.app.ip(), self.app.cmd_port(), "slam poll %d" % self.last, 0.6)
+            p = (r or {}).get("slam_poll")
+            more = False
+            if p:
+                self._ingest(p)
+                more = len(p.get("poses", [])) >= 100                 # a full reply: ask again at once
+            if not more:
+                time.sleep(0.1)
+
+    # -- window ---------------------------------------------------------------------------------------------------
+    def open(self):
+        if self.win is not None:
+            try:
+                if self.win.winfo_exists():
+                    self.win.lift()
+                    return
+            except tk.TclError:
+                pass
+        w = tk.Toplevel(self.app.root)
+        w.title("Live SLAM - 3D view (monocular: arbitrary scale)")
+        w.geometry("980x720")
+        c = tk.Canvas(w, bg="#101114", highlightthickness=0)
+        c.pack(fill=tk.BOTH, expand=True)
+        c.bind("<ButtonPress-1>", lambda e: setattr(self, "_drag", (e.x, e.y)))
+        c.bind("<B1-Motion>", self._on_drag)
+        c.bind("<MouseWheel>", lambda e: setattr(self, "zoom", max(0.2, min(8.0, self.zoom * (1.1 ** (e.delta / 120.0))))))
+        c.bind("<Double-Button-1>", lambda e: (setattr(self, "yaw", 0.7), setattr(self, "pitch", 0.55), setattr(self, "zoom", 1.0)))
+        self.win, self.canvas = w, c
+        self._redraw()
+
+    def _on_drag(self, e):
+        if self._drag:
+            self.yaw += (e.x - self._drag[0]) * 0.01
+            self.pitch = max(-1.5, min(1.5, self.pitch + (e.y - self._drag[1]) * 0.01))
+        self._drag = (e.x, e.y)
+
+    def _redraw(self):
+        c = self.canvas
+        try:
+            if self.win is None or not self.win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        W, H = max(c.winfo_width(), 200), max(c.winfo_height(), 200)
+        c.delete("all")
+        with self.lock:
+            maps = [list(m) for m in self.maps]
+            cur = self.cur
+            st, fps, ms, skipped, total, nmaps = self.state, self.fps, self.ms, self.skipped, self.total, self.nmaps
+        pts = [p for m in maps for p in m]
+        if cur:
+            pts.append(cur[:3])
+        if pts:
+            lo = [min(p[i] for p in pts) for i in range(3)]
+            hi = [max(p[i] for p in pts) for i in range(3)]
+        else:
+            lo, hi = [-0.5] * 3, [0.5] * 3
+        ctr = [(lo[i] + hi[i]) / 2 for i in range(3)]
+        ext = max(hi[i] - lo[i] for i in range(3))
+        ext = max(ext, 1e-6)
+        cy_, sy_, cp_, sp_ = math.cos(self.yaw), math.sin(self.yaw), math.cos(self.pitch), math.sin(self.pitch)
+        S = 0.9 * min(W, H) * self.zoom
+        DIST = 2.2
+
+        def proj(p):
+            x, y, z = (p[0] - ctr[0]) / ext, (p[1] - ctr[1]) / ext, (p[2] - ctr[2]) / ext
+            x1, y1 = cy_ * x - sy_ * y, sy_ * x + cy_ * y
+            y2, z2 = cp_ * y1 - sp_ * z, sp_ * y1 + cp_ * z
+            k = S * DIST / max(0.3, DIST + y2)
+            return W / 2 + x1 * k, H / 2 - z2 * k
+
+        # ground grid below the path
+        zg = lo[2] - 0.02 * ext
+        g = ext * 0.75
+        n = 8
+        for i in range(-n, n + 1):
+            a = proj((ctr[0] + i * g / n, ctr[1] - g, zg))
+            b = proj((ctr[0] + i * g / n, ctr[1] + g, zg))
+            c.create_line(a[0], a[1], b[0], b[1], fill="#23262d")
+            a = proj((ctr[0] - g, ctr[1] + i * g / n, zg))
+            b = proj((ctr[0] + g, ctr[1] + i * g / n, zg))
+            c.create_line(a[0], a[1], b[0], b[1], fill="#23262d")
+        # trails, one colour per map (a new map starts after the old one was lost)
+        for mi, m in enumerate(maps):
+            if len(m) < 2:
+                continue
+            step = max(1, len(m) // 3000)
+            flat = []
+            for p in m[::step] + ([m[-1]] if step > 1 else []):
+                q = proj(p)
+                flat += [q[0], q[1]]
+            c.create_line(*flat, fill=SLAM_MAP_COLORS[mi % len(SLAM_MAP_COLORS)], width=2)
+            q = proj(m[0])
+            c.create_oval(q[0] - 4, q[1] - 4, q[0] + 4, q[1] + 4, fill="#3ec16a", outline="")
+        # current camera: a small pyramid looking along its optical axis
+        if cur:
+            o = cur[:3]
+            right, down, fwd = cur[3], cur[4], cur[5]
+            s = 0.06 * ext
+            corners = []
+            for sx_, sz_ in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                corners.append(tuple(o[i] + s * (0.8 * fwd[i] + 0.5 * sx_ * right[i] + 0.35 * sz_ * down[i]) for i in range(3)))
+            po = proj(o)
+            pc = [proj(q) for q in corners]
+            for q in pc:
+                c.create_line(po[0], po[1], q[0], q[1], fill="#ffffff")
+            c.create_line(*(sum(([q[0], q[1]] for q in pc + [pc[0]]), [])), fill="#ffffff")
+            c.create_oval(po[0] - 4, po[1] - 4, po[0] + 4, po[1] + 4, fill="#ffd166", outline="")
+        # axes triad in the corner
+        ox, oy = 70, H - 60
+        for (dx, dy, dz), col, lab in (((1, 0, 0), "#e5484d", "x right"), ((0, 1, 0), "#46a758", "y forward"), ((0, 0, 1), "#3e63dd", "z up")):
+            x1, y1 = cy_ * dx - sy_ * dy, sy_ * dx + cy_ * dy
+            y2, z2 = cp_ * y1 - sp_ * dz, sp_ * y1 + cp_ * dz
+            c.create_line(ox, oy, ox + 40 * x1, oy - 40 * z2, fill=col, width=2)
+            c.create_text(ox + 48 * x1, oy - 48 * z2, text=lab, fill=col, font=("Segoe UI", 9))
+        text, col = SLAM_STATES.get(st, ("?", "#9aa0a6"))
+        c.create_text(14, 14, anchor="nw", text=text, fill=col, font=("Segoe UI", 15, "bold"))
+        c.create_text(14, 44, anchor="nw", fill="#c9ccd1", font=("Segoe UI", 10),
+                      text="%.0f fps   %.0f ms per frame   %d poses   %d map%s%s" % (
+                          fps, ms, sum(len(m) for m in maps), nmaps, "" if nmaps == 1 else "s",
+                          "   (frames skipped: %d/s)" % skipped if skipped > 3 else ""))
+        c.create_text(14, H - 14, anchor="sw", fill="#7d818a", font=("Segoe UI", 9),
+                      text="mouse: rotate  |  wheel: zoom  |  double-click: reset view   |   monocular: the scale is arbitrary (units of the map)")
+        self.win.after(100, self._redraw)
+
+
 REMOTE_LIST_PY = r'''
 import json, os, glob
 out = []
@@ -376,6 +573,8 @@ class App:
         self._themed = []             # (widget, {option: palette key})
         self._apply_job = None
 
+        self.slam3d = Slam3D(self)
+        self.slam_on = False
         self._init_visual()
         self._build_ui()
         self.rx = [VideoReceiver(lambda b, w, h, i=i: self._frame_cb(i, b, w, h),
@@ -386,6 +585,7 @@ class App:
         threading.Thread(target=self._poll_status, daemon=True).start()
         self._poll_frames()
         self._tick()
+        self._slam_tick()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.log("%s %s - Jetson %s" % (APP_NAME, APP_VERSION, self.cfg["ip"]))
         if args.shot:
@@ -547,8 +747,9 @@ class App:
         lc.bind("<Leave>", lambda e: lc.unbind_all("<MouseWheel>"))
         left.columnconfigure(0, weight=1)
         self._build_recording(left, 0)
-        self._build_camera(left, 1)
-        self._build_status(left, 2)
+        self._build_slam(left, 1)
+        self._build_camera(left, 2)
+        self._build_status(left, 3)
 
         # RIGHT: video + log
         right = ttk.Frame(body)
@@ -607,6 +808,75 @@ class App:
         for i, (name, key) in enumerate([("State", "state"), ("Elapsed", "elapsed"), ("Frames saved", "frames"),
                                          ("Rate", "rate"), ("IMU rows", "imurows"), ("Size on Jetson", "size"), ("Free disk (Jetson)", "free")]):
             self._row(grid, i, name, key)
+
+    # -- live SLAM -----------------------------------------------------------------------------------------------
+    def _build_slam(self, parent, row):
+        f = ttk.LabelFrame(parent, text="Live SLAM (ORB-SLAM3, one camera, runs on the Jetson)", padding=(8, 6))
+        f.grid(row=row, column=0, sticky="ew", pady=(0, 4))
+        f.columnconfigure(0, weight=1)
+        self.slam_btn = tk.Button(f, text="◆  START LIVE SLAM", font=self.F_BIG, bg="#2f6fb5", fg="white",
+                                  activebackground="#3b82d1", activeforeground="white", relief="flat", bd=0, height=2,
+                                  command=self._on_slam_toggle)
+        self.slam_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=2)
+        ttk.Button(f, text="3D view", command=self.slam3d.open).grid(row=0, column=1, padx=(4, 0), pady=2)
+        self.slam_txt = tk.StringVar(value="off")
+        self.slam_lbl = tk.Label(f, textvariable=self.slam_txt, font=self.F_MONO_V, anchor="w", justify="left")
+        self.reg(self.slam_lbl, bg="PANEL_BG", fg="PARAM_FG")
+        self.slam_lbl.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        hint = tk.Label(f, text="Move the rig slowly SIDEWAYS until it says TRACKING (turning on the spot is not enough). "
+                                "Works with or without recording. One camera = arbitrary scale.",
+                        font=self.F_UI, anchor="w", justify="left", wraplength=int(520 * self._scale))
+        self.reg(hint, bg="PANEL_BG", fg="SEC_FG")
+        hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+    def _slam_set_button(self, on):
+        self.slam_on = on
+        self.slam_btn.configure(text="■  STOP LIVE SLAM" if on else "◆  START LIVE SLAM", bg=REC_RED if on else "#2f6fb5",
+                                activebackground="#d6473a" if on else "#3b82d1")
+
+    def _on_slam_toggle(self):
+        self.slam_btn.configure(state=tk.DISABLED)
+
+        def run():
+            try:
+                if not self.slam_on:
+                    self.log("live SLAM: starting on the Jetson (loading the vocabulary takes ~10 s) ...")
+                    r = self.send("slam on", 20.0)
+                    if r is None:
+                        self.log("!! no reply from the Jetson")
+                    elif r.get("error"):
+                        self.log("!! live SLAM: %s" % r["error"])
+                    else:
+                        self.root.after(0, lambda: (self._slam_set_button(True), self.slam3d.start(), self.slam3d.open()))
+                else:
+                    self.root.after(0, lambda: self._slam_set_button(False))
+                    self.slam3d.stop()
+                    r = self.send("slam off", 25.0)
+                    self.log("live SLAM stopped; the path is saved on the Jetson in ~/orbslam/live_out" if r else "!! no reply from the Jetson")
+            finally:
+                self.root.after(0, lambda: self.slam_btn.configure(state=tk.NORMAL))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _slam_tick(self):
+        """Keeps the SLAM button / line in step with what the Jetson really does (also after the app was restarted)."""
+        st = self.status if self.status and time.time() - self.status_t < STATUS_STALE_S else None
+        slam = (st or {}).get("slam") or {}
+        running = bool(slam.get("running"))
+        if st is not None and running != self.slam_on and str(self.slam_btn["state"]) != "disabled":
+            self._slam_set_button(running)
+            if running:
+                self.slam3d.start()
+        if self.slam_on:
+            s = self.slam3d.snapshot()
+            name, col = SLAM_STATES.get(s["state"], ("?", "#9aa0a6"))
+            self.slam_txt.set("%s | %.0f fps  %.0f ms | %d poses, %d map%s" % (
+                name.split(" - ")[0], s["fps"], s["ms"], s["poses"], s["maps"], "" if s["maps"] == 1 else "s"))
+            self.slam_lbl.configure(fg=col)
+        elif st is not None and not slam.get("installed", True):
+            self.slam_txt.set("ORB-SLAM3 is not installed on this Jetson")
+        else:
+            self.slam_txt.set("off")
+        self.root.after(250, self._slam_tick)
 
     def _row(self, parent, i, name, key, width=18):
         bg = "ROW_EVEN" if i % 2 else "ROW_ODD"
@@ -1263,6 +1533,10 @@ class App:
         self._on_close()
 
     def _on_close(self):
+        if self.slam_on:                        # ask the Jetson to stop SLAM (it saves the path); do not wait for it
+            threading.Thread(target=lambda: udp_send(self.ip(), self.cmd_port(), "slam off", 0.3), daemon=True).start()
+            time.sleep(0.2)
+        self.slam3d.stop()
         for r in self.rx:
             r.shutdown()
         self.root.destroy()

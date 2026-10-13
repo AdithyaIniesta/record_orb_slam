@@ -6,8 +6,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ORB_COMMIT=4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4        # upstream commit our patch was made against
 SRC="${ORB_SRC:-/opt/ORB_SLAM3_upstream}"
-[ -d "$SRC/.git" ] || git clone https://github.com/UZ-SLAMLab/ORB_SLAM3.git "$SRC"
-git -C "$SRC" checkout -q "$ORB_COMMIT"
+# only the pinned commit (the full upstream history is 1.6 GB because of the vocabulary file)
+if [ ! -d "$SRC/.git" ]; then git init -q "$SRC"; git -C "$SRC" remote add origin https://github.com/UZ-SLAMLab/ORB_SLAM3.git; fi
+git -C "$SRC" cat-file -e "$ORB_COMMIT" 2>/dev/null || git -C "$SRC" fetch -q --depth 1 origin "$ORB_COMMIT"
+git -C "$SRC" checkout -q -f "$ORB_COMMIT"
 DST=/opt/orbslam3
 PANGOLIN_TAG=v0.8
 # ORB-SLAM3 compiles several large files; keep RAM use sane (see the Kalibr build, where -j16 OOM-killed g++).
@@ -38,11 +40,14 @@ sed -i 's/-std=c++11/-std=c++14/g' Thirdparty/DBoW2/CMakeLists.txt Thirdparty/g2
 # wsl_fixes.patch: C++17 for Pangolin 0.8, int instead of bool counter in LoopClosing.h, and System::Shutdown() waiting
 # for the viewer/mapping threads. (CRLF line endings are stripped first in case the source came from a Windows checkout.)
 sed -i 's/\r$//' CMakeLists.txt include/LoopClosing.h src/System.cc
-if patch -p1 --dry-run -s < "$HERE/wsl_fixes.patch" >/dev/null 2>&1; then
-  patch -p1 -s < "$HERE/wsl_fixes.patch"
-else
-  echo "wsl_fixes.patch already applied (or tree differs), skipping"
-fi
+sed -i 's/\r$//' Examples/Monocular/mono_euroc.cc Examples/Monocular-Inertial/mono_inertial_euroc.cc Examples/Stereo/stereo_euroc.cc
+for p in wsl_fixes.patch viewer_env.patch; do          # viewer_env.patch: examples are headless unless ORB_VIEWER=1
+  if patch -p1 --dry-run -s < "$HERE/$p" >/dev/null 2>&1; then
+    patch -p1 -s < "$HERE/$p"
+  else
+    echo "$p already applied (or tree differs), skipping"
+  fi
+done
 
 # vocabulary
 [ -f Vocabulary/ORBvoc.txt ] || tar -xf Vocabulary/ORBvoc.txt.tar.gz -C Vocabulary
