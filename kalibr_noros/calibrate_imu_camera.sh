@@ -15,10 +15,10 @@ REC="$(cd "${1:?usage: $0 RECORDING_DIR [cam0|cam1] [TARGET.yaml]}" && pwd)"
 CAM="${2:-cam0}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${3:-$HERE/inputs/aprilgrid_kalibr_6x4_50mm_A3.yaml}"
-PREFIX="${PREFIX:-/opt/kalibr_noros}"
+[ -z "${PREFIX:-}" ] && { [ -x "$HOME/kalibr/kalibr-run" ] && PREFIX="$HOME/kalibr" || PREFIX=/opt/kalibr_noros; }
 WORK="${WORK:-/tmp/kalibr_work}"
 RUN="$PREFIX/kalibr-run"; [ -x "$RUN" ] || RUN="$PREFIX/run.sh"
-[ -x "$RUN" ] || { echo "Kalibr not found in $PREFIX - run: sudo ./setup_kalibr_noros.sh"; exit 1; }
+[ -x "$RUN" ] || { echo "Kalibr not found in $PREFIX - run: sudo ./setup_kalibr_noros.sh (Jetson: ./setup_kalibr_jetson.sh)"; exit 1; }
 NAME="$(basename "$REC")_$CAM"
 DS="$WORK/$NAME"
 rm -rf "$DS"; mkdir -p "$DS/mav0/$CAM" "$DS/mav0/imu0"
